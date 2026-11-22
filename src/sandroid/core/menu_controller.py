@@ -533,6 +533,17 @@ class MenuController:
             inline_text="[^Y] AI chat",
         )
         self._register(
+            "toggle_device",
+            "Device screen",
+            "ctrl+g",
+            ActionCategory.NAVIGATION,
+            ["forensic", "malware", "security"],
+            description="Show the emulator's screen live beside the lens: "
+            "click and scroll on it, Ctrl+G again to type on it (Esc goes "
+            "back to the lens), a third time to close it",
+            inline_text="[^G] Device screen",
+        )
+        self._register(
             "toggle_log",
             "Toggle log drawer",
             "grave_accent",
@@ -892,6 +903,10 @@ class MenuController:
 
         if action_name == "device_selector":
             # The Devices screen is handled by the view layer (TUI)
+            return True
+
+        if action_name == "toggle_device":
+            # The device screen column is handled by the view layer (TUI)
             return True
 
         # Route directly to command system if key is a command key

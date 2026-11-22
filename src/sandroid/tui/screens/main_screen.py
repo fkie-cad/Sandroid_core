@@ -5,6 +5,7 @@ Enter→Inspector hook, scope, badges, log drawer) are documented in
 ``sandroid.tui.widgets.lens_shell``'s module docstring.
 """
 
+import itertools
 import logging
 from typing import TYPE_CHECKING
 
@@ -127,6 +128,46 @@ NARROW_WIDTH = 120
 CHAT_TITLE = "Sandroid AI"
 
 
+#: Device screen column (Ctrl+G): fewest columns the phone itself may get
+#: (below that the Inspector and the device column cannot both stay), the
+#: columns the lens always keeps, and the most of the window it may take.
+DEVICE_MIN_COLS = 20
+LENS_MIN_COLS = 40
+DEVICE_MAX_SHARE = 0.6
+#: The column's frame (round border) and the rows under the phone (the
+#: Back · Home · Recents words and the status line).
+DEVICE_CHROME_COLS = 2
+DEVICE_CHROME_ROWS = 4
+DEVICE_TITLE = "Device screen"
+
+
+def focus_takes_text(widget: Widget | None) -> bool:
+    """Whether printable keys belong to the focused ``widget``.
+
+    True for a text field (Input, TextArea) and for the focused live device
+    screen (it types on the phone). App and lens letter commands, ``D``,
+    ``?`` and the Inspector's ←/→ must then leave the key alone.
+    """
+    if widget is None:
+        return False
+    from textual.widgets import Input, TextArea
+
+    return isinstance(widget, Input | TextArea) or bool(
+        getattr(widget, "takes_text", False)
+    )
+
+
+def inspector_cols(width: int) -> int:
+    """Width of the open Inspector in a window ``width`` columns wide.
+
+    Mirrors the ``#side-slot`` CSS: 40 % (at least 56) normally, 45 % below
+    :data:`NARROW_WIDTH`.
+    """
+    if width < NARROW_WIDTH:
+        return int(width * 0.45)
+    return max(56, int(width * 0.4))
+
+
 def chat_rows(height: int, ratio: float) -> int:
     """Chat rows for a left column of ``height`` rows at ``ratio`` (split).
 
@@ -186,6 +227,20 @@ class _LeftCol(Vertical):
         apply = getattr(self.screen, "_apply_chat_layout", None)
         if apply is not None:
             apply()
+
+
+class _DeviceCol(Vertical):
+    """``#device-col``: the live device screen; re-fits on its own resize.
+
+    Composed empty; the phone and its controls are mounted on first open
+    (``MainScreen.open_device``), so nothing loads for users who never
+    open it. The log drawer changes its height without a screen resize.
+    """
+
+    def on_resize(self, _event) -> None:
+        fit = getattr(self.screen, "_fit_device_col", None)
+        if fit is not None:
+            fit()
 
 
 class ChatDock(Vertical):
@@ -351,7 +406,12 @@ class MainScreen(Screen):
             # "⏎ Inspect".
             focused = self.focused
             if focused is not None:
-                for box_id in ("#log-drawer", "#side-slot", "#chat-dock"):
+                for box_id in (
+                    "#log-drawer",
+                    "#side-slot",
+                    "#chat-dock",
+                    "#device-col",
+                ):
                     try:
                         box = self.query_one(box_id)
                     except Exception:
@@ -367,17 +427,14 @@ class MainScreen(Screen):
                 return False
             if not parameters or parameters[0] not in (content.keys or {}):
                 return False
-            from textual.widgets import Input, TextArea
-
-            return not isinstance(self.focused, Input | TextArea)
+            return not focus_takes_text(self.focused)
         if action in ("inspector_tab", "inspector_arrow"):
             content = self.inspector_content
             if not (self.inspector_is_open and content and content.tabs):
                 return False
-            from textual.widgets import Input, TextArea
-
-            # A text input keeps ←/→ (caret) and [ / ] (typed characters).
-            if isinstance(self.focused, Input | TextArea):
+            # A text input keeps ←/→ (caret) and [ / ] (typed characters);
+            # so does the focused device screen (keys go to the phone).
+            if focus_takes_text(self.focused):
                 return False
             if action == "inspector_arrow":
                 # A widget with its own ←/→ (the Timeline type bar, the
@@ -499,6 +556,23 @@ class MainScreen(Screen):
     MainScreen #side-slot.-inspector > #inspector {
         display: block;
     }
+    /* Live device screen (Ctrl+G): right of the Inspector; its width is
+       set inline by _fit_device_col. */
+    MainScreen #device-col {
+        display: none;
+        width: 40;
+        height: 1fr;
+        border: round $lens-rule;
+        border-title-color: $lens-accent;
+        border-title-style: bold;
+        background: $lens-panel;
+    }
+    MainScreen #device-col.-open {
+        display: block;
+    }
+    MainScreen #device-col:focus-within {
+        border: round $lens-rule-focus;
+    }
     /* While the chat is open the log drawer may not eat the chat's rows. */
     MainScreen.-chat-open #log-drawer {
         max-height: 30%;
@@ -542,6 +616,15 @@ class MainScreen(Screen):
         self._scope_label: str | None = None
         # lens id -> (title, info) for the lens frame.
         self._lens_captions: dict[str, tuple[str | None, str | None]] = {}
+        # Live device screen column (Ctrl+G): open?, the widget once mounted,
+        # the input policy last sent, and open order vs. the Inspector (the
+        # one opened earlier yields when both do not fit).
+        self._device_open = False
+        self._device_widget = None
+        self._device_policy_sent: tuple[str | None, bool] | None = None
+        self._open_order = itertools.count(1)
+        self._device_seq = 0
+        self._inspector_seq = 0
         # Typing guard (see on_key): monotonic deadline, ignored text.
         self._typing_until = 0.0
         self._typed_ignored = ""
@@ -572,6 +655,8 @@ class MainScreen(Screen):
                     yield self._make_chat_panel()
             with Vertical(id="side-slot"):
                 yield Inspector(id="inspector")
+            # Empty until the first Ctrl+G (see open_device).
+            yield _DeviceCol(id="device-col")
         yield LogTicker(id="log-ticker")
         with LogDrawer(id="log-drawer"):
             yield ActivityLog(id="activity-log")
@@ -595,6 +680,13 @@ class MainScreen(Screen):
         self._disable_hidden_lenses()
         self._load_chat_dock_prefs()
         self.set_class(self.app.size.width < NARROW_WIDTH, "-narrow")
+        try:
+            self.query_one("#device-col").border_title = DEVICE_TITLE
+        except Exception:
+            pass
+        if self._load_device_panel_pref():
+            # Remembered open: restore once the layout has its sizes.
+            self.call_after_refresh(self.open_device, False, persist=False)
 
         # Show welcome message immediately (fast)
         try:
@@ -1005,10 +1097,13 @@ class MainScreen(Screen):
         slot = self._side_slot()
         if slot is None:
             return
+        if mode == "inspector" and self._side_mode != "inspector":
+            self._inspector_seq = next(self._open_order)
         self._side_mode = mode
         slot.set_class(mode is not None, "-open")
         slot.set_class(mode == "inspector", "-inspector")
         self.refresh_bindings()
+        self._fit_device_col()
 
     @property
     def side_slot_mode(self) -> str | None:
@@ -1125,6 +1220,7 @@ class MainScreen(Screen):
         0. A focused approval prompt answers "No" (its ``action_cancel``):
            the App's priority Esc would otherwise never reach it.
         1. Focus in the chat dock goes to the lens; the chat stays open.
+           So does a focused device screen (its column stays open).
         2. A focused text input elsewhere keeps the old behaviour (a lens
            filter may clear itself, else Esc leaves the input -> False).
         3. An open Inspector closes, then the log drawer, then the chat.
@@ -1143,6 +1239,11 @@ class MainScreen(Screen):
             return True
         if self.chat_has_focus:
             self._leave_chat_dock()
+            return True
+        if self.device_has_focus:
+            # The phone keeps no Esc (Back is the word under it): the
+            # focus goes back to the lens, the column stays open.
+            self._focus_lens()
             return True
         focused = self.focused
         slot = self._side_slot()
@@ -1511,6 +1612,309 @@ class MainScreen(Screen):
 
     def on_resize(self, event) -> None:
         self.set_class(event.size.width < NARROW_WIDTH, "-narrow")
+        if self._device_open:
+            self.call_after_refresh(self._fit_device_col)
+
+    # -- live device screen column (Ctrl+G) ------------------------------------
+    #
+    # ``#device-col`` sits right of the Inspector. It is composed empty; the
+    # DeviceScreen, the Back · Home · Recents words and the status line are
+    # mounted on the first open. Its width follows the phone:
+    # ``min(preferred_cols(rows), W - Inspector - 40)`` capped at 60 % of the
+    # window; when the phone would get fewer than DEVICE_MIN_COLS columns
+    # beside an open Inspector, the one of the two opened earlier closes
+    # (one log line). It streams only while it is shown and this screen is
+    # on top (a modal, Help or Devices pauses it). The mouse controls the
+    # phone without focus; keys reach it only while it has the focus.
+
+    #: Cell size in px for the device screen (tests); None = the terminal's.
+    device_cell_px: tuple[float, float] | None = None
+
+    def _device_col(self):
+        try:
+            return self.query_one("#device-col")
+        except Exception:
+            return None
+
+    @property
+    def device_is_open(self) -> bool:
+        """The device screen column is shown."""
+        return self._device_open
+
+    @property
+    def device_widget(self):
+        """The mounted DeviceScreen (None before the first open)."""
+        return self._device_widget
+
+    @property
+    def device_has_focus(self) -> bool:
+        """The live device screen has the focus (keys go to the phone)."""
+        widget = self._device_widget
+        return widget is not None and self.focused is widget
+
+    def toggle_device_panel(self) -> None:
+        """Ctrl+G: open + focus the device screen; focus it; or close it.
+
+        Closed -> open it and focus the phone. Open but the focus is
+        elsewhere -> focus the phone. Open and focused -> close it.
+        """
+        if not self._device_open:
+            self.open_device()
+        elif not self.device_has_focus:
+            self._focus_device()
+        else:
+            self.close_device()
+
+    def _device_config(self):
+        try:
+            return self.app.sandroid_config.tui.device_screen
+        except Exception:
+            return None
+
+    def _ensure_device_widgets(self):
+        """Mount the phone and its controls into ``#device-col`` (once)."""
+        if self._device_widget is not None:
+            return self._device_widget
+        col = self._device_col()
+        if col is None:
+            return None
+        try:
+            from sandroid.tui.widgets.device_screen import (
+                DeviceKeys,
+                DeviceScreen,
+                DeviceStatus,
+            )
+        except Exception as exc:
+            self._log_to_activity(f"The device screen cannot load: {exc}", error=True)
+            return None
+        service = None
+        try:
+            from sandroid.services import get_device_screen_service
+
+            service = get_device_screen_service()
+        except Exception as exc:
+            logger.debug("device screen service unavailable", exc_info=True)
+            self._log_to_activity(
+                f"The device screen service is not available: {exc}", error=True
+            )
+        cfg = self._device_config()
+        widget = DeviceScreen(
+            service,
+            cell_px=self.device_cell_px,
+            max_fps=float(getattr(cfg, "max_fps", 60) or 60),
+            bezel=bool(getattr(cfg, "bezel", True)),
+            touch_marker=bool(getattr(cfg, "touch_marker", True)),
+            policy=self._sync_device_policy,
+            id="device-screen",
+        )
+        status = DeviceStatus(id="device-status")
+        widget.status_line = status
+        col.mount(widget, DeviceKeys(widget, id="device-keys"), status)
+        self._device_widget = widget
+        return widget
+
+    def open_device(self, focus: bool = True, *, persist: bool = True) -> None:
+        """Show the device screen column (mounting it on first use).
+
+        Args:
+            focus: Give the phone the focus (keys go to it).
+            persist: Remember the column as open (ui_state).
+        """
+        if not self._device_open:
+            col = self._device_col()
+            widget = self._ensure_device_widgets()
+            if col is None or widget is None:
+                return
+            self._device_open = True
+            self._device_seq = next(self._open_order)
+            col.set_class(True, "-open")
+            self.app.set_class(True, "-device-open")
+            self._device_policy_sent = None
+            self._sync_device_policy()
+            self._fit_device_col()
+            if not self._device_open:  # too narrow even alone
+                return
+            self._sync_device_active()
+            self.refresh_bindings()
+            if persist:
+                self._persist_device_panel(True)
+        if focus:
+            self._focus_device()
+
+    def close_device(self, *, persist: bool = True) -> None:
+        """Hide the device screen column (its stream stops)."""
+        if not self._device_open:
+            return
+        refocus = self.focused is None or self.device_has_focus
+        widget = self._device_widget
+        if widget is not None:
+            widget.lift()
+        self._device_open = False
+        col = self._device_col()
+        if col is not None:
+            col.set_class(False, "-open")
+        self.app.set_class(False, "-device-open")
+        self._sync_device_active()
+        self.refresh_bindings()
+        if refocus:
+            self._focus_lens()
+        if persist:
+            self._persist_device_panel(False)
+
+    def _focus_device(self) -> None:
+        widget = self._device_widget
+        if widget is not None:
+            try:
+                widget.focus()
+            except Exception:
+                pass
+
+    def lift_device(self) -> None:
+        """Release a touch held on the phone (app blur, modal)."""
+        widget = self._device_widget
+        if widget is not None:
+            widget.lift()
+
+    def _sync_device_active(self) -> None:
+        """Stream only while the column is shown and this screen is on top."""
+        widget = self._device_widget
+        if widget is None:
+            return
+        try:
+            on_top = self.app.screen is self and self.is_attached
+        except Exception:
+            on_top = False
+        widget.set_active(self._device_open and on_top)
+
+    def on_screen_suspend(self, _event) -> None:
+        self.lift_device()
+        self._sync_device_active()
+
+    def on_device_screen_size_changed(self, _event) -> None:
+        """The phone rotated: its column re-fits."""
+        self._fit_device_col()
+
+    def _fit_device_col(self) -> None:
+        """Size ``#device-col`` to the phone; let a column yield if too narrow."""
+        if not self._device_open:
+            return
+        col, widget = self._device_col(), self._device_widget
+        if col is None or widget is None:
+            return
+        width = self.size.width or self.app.size.width
+        try:
+            height = self.query_one("#workspace").size.height
+        except Exception:
+            height = 0
+        if width <= 0 or height <= 0:
+            return
+        want = (
+            widget.preferred_cols(max(2, height - DEVICE_CHROME_ROWS))
+            + DEVICE_CHROME_COLS
+        )
+        beside = inspector_cols(width) if self.inspector_is_open else 0
+        limit = min(width - beside - LENS_MIN_COLS, int(width * DEVICE_MAX_SHARE))
+        cols = min(want, limit)
+        if want > limit and limit - DEVICE_CHROME_COLS < DEVICE_MIN_COLS:
+            if self.inspector_is_open and self._inspector_seq < self._device_seq:
+                self._log_to_activity(
+                    "Inspector closed: not enough room beside the device screen."
+                )
+                self.close_side_slot()  # re-fits through _set_side_mode
+            elif self.inspector_is_open:
+                self._log_to_activity(
+                    "Device screen closed: not enough room beside the Inspector."
+                )
+                self.close_device(persist=False)
+            else:
+                self._log_to_activity(
+                    "Device screen closed: the window is too narrow for it."
+                )
+                self.close_device(persist=False)
+            return
+        if col.styles.width is None or col.styles.width.value != cols:
+            col.styles.width = cols
+
+    def _device_input_policy(self) -> tuple[str | None, bool]:
+        """``(locked reason, allow_clipboard)`` for the phone's input.
+
+        Locked while a Rewind / Replay (or a replay of a recording) runs;
+        the guest clipboard stays untouched while Record or Tracking is on.
+        """
+        locked: str | None = None
+        allow_clipboard = True
+        rc = getattr(self.app, "_recording_controller", None)
+        try:
+            if rc is not None and rc.is_replaying:
+                kind = (getattr(rc, "run_kind", None) or "replay").lower()
+                locked = f"input is locked while a {kind} runs"
+        except Exception:
+            pass
+        if locked is None:
+            try:
+                if self.query_one("#status-bar").replay_active:
+                    locked = "input is locked while a replay runs"
+            except Exception:
+                pass
+        try:
+            if rc is not None and rc.is_recording():
+                allow_clipboard = False
+        except Exception:
+            pass
+        if allow_clipboard:
+            try:
+                from sandroid.tui.widgets.timeline_lens import tracking_module
+
+                mod = tracking_module()
+                if mod is not None and mod.is_active():
+                    allow_clipboard = False
+            except Exception:
+                pass
+        return locked, allow_clipboard
+
+    def _sync_device_policy(self) -> None:
+        """Tell the service the current input policy (only when it changed)."""
+        widget = self._device_widget
+        service = getattr(widget, "service", None)
+        if service is None:
+            return
+        policy = self._device_input_policy()
+        if policy == self._device_policy_sent:
+            return
+        self._device_policy_sent = policy
+        try:
+            service.set_input_policy(locked=policy[0], allow_clipboard=policy[1])
+        except Exception:
+            logger.debug("set_input_policy failed", exc_info=True)
+
+    def _load_device_panel_pref(self) -> bool:
+        """Whether the column was open when Sandroid last ran (ui_state)."""
+        try:
+            from sandroid.config.ui_state import load_ui_state
+
+            prefs = load_ui_state().get("device_screen")
+        except Exception:
+            logger.debug("reading the UI state failed", exc_info=True)
+            return False
+        return isinstance(prefs, dict) and bool(prefs.get("open", False))
+
+    def _persist_device_panel(self, is_open: bool) -> None:
+        """Remember whether the column is open (off the UI thread)."""
+        self.run_worker(
+            lambda: self._write_device_panel_pref(is_open),
+            thread=True,
+            group="device-screen-prefs",
+            exit_on_error=False,
+        )
+
+    def _write_device_panel_pref(self, is_open: bool) -> None:
+        """Save the column's open state (runs on a worker thread)."""
+        try:
+            from sandroid.config.ui_state import update_ui_state
+
+            update_ui_state("device_screen", {"open": is_open})
+        except Exception as exc:
+            logger.warning(f"Could not save the device screen state: {exc}")
 
     # -- focus guard + key routing ---------------------------------------------
     #
@@ -1563,19 +1967,19 @@ class MainScreen(Screen):
         return focused is None or not is_shown(focused)
 
     def _focus_is_elsewhere_on_purpose(self) -> bool:
-        """A text field (the AI chat, a lens filter), the side slot or the
-        chat dock has focus: its unhandled keys (Ctrl+L ...) must not run
-        lens commands.
+        """A text field (the AI chat, a lens filter), the device screen, the
+        side slot or the chat dock has focus: its unhandled keys (Ctrl+L
+        ...) must not run lens commands.
         """
-        from textual.widgets import Input, TextArea
-
         focused = self.focused
         if focused is None:
             return False
-        if isinstance(focused, Input | TextArea) or self.chat_has_focus:
+        if focus_takes_text(focused) or self.chat_has_focus:
             return True
-        slot = self._side_slot()
-        return slot is not None and slot in focused.ancestors
+        for box in (self._side_slot(), self._device_col()):
+            if box is not None and box in focused.ancestors:
+                return True
+        return False
 
     def _rehome_focus(self, resumed: bool = False) -> None:
         """Give focus back to the active lens if it is in limbo (see above).
@@ -1607,6 +2011,7 @@ class MainScreen(Screen):
 
     def on_screen_resume(self, _event) -> None:
         self.call_after_refresh(self._rehome_focus, True)
+        self._sync_device_active()
 
     def start_typing_guard(self) -> None:
         """Treat the next letters as stray text, not commands (see on_key).
@@ -1644,8 +2049,6 @@ class MainScreen(Screen):
         """
         import time
 
-        from textual.widgets import Input, TextArea
-
         now = time.monotonic()
         if self._typing_until <= now:
             if self._typing_until:
@@ -1654,7 +2057,7 @@ class MainScreen(Screen):
             return False
         if self.app.screen is not self or not event.is_printable:
             return False
-        if isinstance(self.focused, Input | TextArea):
+        if focus_takes_text(self.focused):
             return False
         paused = now - self._typing_last >= self.TYPING_PAUSE_SECONDS
         self._typing_last = now

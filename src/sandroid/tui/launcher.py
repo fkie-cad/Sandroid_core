@@ -129,6 +129,7 @@ def run_tui(
     # app.run() that raised (e.g. SystemExit from a worker) or returned a
     # non-zero code is a crash, never a "quit".
     close_reason = "crash"
+    _detect_terminal_graphics(config)
     try:
         logger.debug("starting TUI app.run()")
         app.run()
@@ -139,6 +140,33 @@ def run_tui(
         mark_app_returned()
         reset_terminal()
         _shutdown_services(get_task_service, get_network_capture_service, close_reason)
+
+
+def _detect_terminal_graphics(config: object) -> None:
+    """Ask the terminal which image protocol it speaks (device screen).
+
+    Runs once, before Textual owns the terminal: only on a TTY, at most
+    ~200 ms, never inside tmux. The result is cached in
+    :mod:`sandroid.tui.terminal_graphics` for the device screen (Ctrl+G).
+    """
+    try:
+        from sandroid.tui import terminal_graphics
+
+        cfg = getattr(getattr(config, "tui", None), "device_screen", None)
+        preferred = str(getattr(cfg, "backend", "auto") or "auto")
+        caps = terminal_graphics.detect(preferred=preferred)
+        logger.debug(f"device screen backend: {caps.backend} ({caps.reason})")
+    except Exception:
+        logger.debug("terminal graphics detection failed", exc_info=True)
+
+
+def _close_device_screen() -> None:
+    """Stop the device screen's threads if the service was ever created."""
+    from sandroid.services import peek_device_screen_service
+
+    service = peek_device_screen_service()
+    if service is not None:
+        service.close()
 
 
 def exit_close_reason(code: object) -> str:
@@ -156,6 +184,8 @@ def _shutdown_services(
     # First: stop any replay still tapping on the device. Its worker thread
     # outlives the app (crash or quit) and used to keep replaying for minutes.
     _cleanup_with_timeout(_cancel_replays, timeout=1.0)
+    # The live device screen's stream / input threads (idempotent).
+    _cleanup_with_timeout(_close_device_screen, timeout=1.0)
     _cleanup_with_timeout(_shutdown_ui_bus, timeout=2.0)
     # Idempotent: a no-op when the quit already stopped mitmweb.
     _cleanup_with_timeout(_shutdown_network, timeout=5.0)

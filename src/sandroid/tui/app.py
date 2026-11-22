@@ -16,6 +16,7 @@ import logging
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -62,7 +63,7 @@ from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
 from sandroid.tui.screens.devices_screen import DevicesScreen
 from sandroid.tui.screens.help_screen import LEGACY_BINDING_IDS, HelpScreen
-from sandroid.tui.screens.main_screen import MainScreen
+from sandroid.tui.screens.main_screen import MainScreen, focus_takes_text
 from sandroid.tui.themes import (
     THEMES,
     build_textual_theme,
@@ -112,9 +113,28 @@ def effective_keymap(keybindings: dict | None) -> dict[str, str]:
     return keymap
 
 
+def _close_device_screen_service() -> None:
+    """Close the live device screen service if it was created (idempotent)."""
+    try:
+        from sandroid.services import peek_device_screen_service
+
+        service = peek_device_screen_service()
+        if service is not None:
+            service.close()
+    except Exception:
+        logger.debug("closing the device screen service failed", exc_info=True)
+
+
 #: App actions that run only while the MainScreen is on top.
 _MAIN_SCREEN_ONLY = frozenset(
-    {"label_start", "label_sub", "label_stop", "label_point", "tracking_toggle"}
+    {
+        "label_start",
+        "label_sub",
+        "label_stop",
+        "label_point",
+        "tracking_toggle",
+        "toggle_device",
+    }
 )
 
 
@@ -127,8 +147,12 @@ class SandroidTUI(App):
     #: rack is invisible, but its vertical scrollbar gutter (2 columns) kept
     #: every toast off the right edge, so the end of the log ticker's hint
     #: (the "g" of "` log") showed beside the toast (R3).
+    #: While the device screen column is open (``-device-open``) toasts
+    #: sit bottom-left: bottom-right they would cover the phone, and a
+    #: graphics image is hidden while anything overlaps it.
     CSS = """
     ToastRack { scrollbar-size-vertical: 0; }
+    .-device-open ToastRack { align: left bottom; }
     """
     ENABLE_COMMAND_PALETTE = False  # we use our own CommandPalette
     #: Open Devices when the post-start check finds no device (the test suite,
@@ -195,6 +219,10 @@ class SandroidTUI(App):
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
         Binding("ctrl+b", "focus_tools", "Focus lens", show=False),
         Binding("ctrl+y", "toggle_chat", "AI chat", show=False, id="toggle_chat"),
+        Binding(
+            "ctrl+g", "toggle_device", "Device screen", show=False,
+            id="toggle_device",
+        ),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -647,6 +675,89 @@ class SandroidTUI(App):
             return False
         return any(isinstance(screen, StartupScreen) for screen in stack)
 
+    # -- live device screen: paint hooks -------------------------------------
+    #
+    # The device screen's graphics backends (iTerm2 / kitty / sixel) write
+    # their image straight to the driver, outside Textual's compositor. To
+    # stay consistent with it, the widget runs inside every Textual paint
+    # (``_end_update``, still inside the synchronized update): it re-emits
+    # its image where Textual repainted its cells and hides it when covered.
+    # Nothing happens until a DeviceScreen with a graphics backend mounted
+    # (``register_device_screen``); the half-block backend never registers.
+    # ``_begin_update`` needs no hook: the widget's own writes run on the
+    # event loop too, so they never land inside Textual's update.
+
+    _device_screen_ref: "weakref.ReferenceType | None" = None
+    _device_paint_update: object = None
+
+    def register_device_screen(self, widget) -> bool:
+        """Route paints (and frame acks) to ``widget``; None unregisters.
+
+        Returns:
+            True when the hooks are in place (graphics backends may run).
+        """
+        if widget is None:
+            self._device_screen_ref = None
+            return True
+        if self._driver is None:
+            return False
+        self._device_screen_ref = weakref.ref(widget)
+        self._install_device_ack_hook()
+        return True
+
+    def _device_screen(self):
+        ref = self._device_screen_ref
+        return ref() if ref is not None else None
+
+    def _install_device_ack_hook(self) -> None:
+        """Swallow the ``CSI 6n`` answers that ack device screen frames.
+
+        Wraps the driver's ``process_message`` (driver input thread) once;
+        any other cursor-position answer passes through unchanged.
+        """
+        driver = self._driver
+        if driver is None or getattr(driver, "_sandroid_device_ack", False):
+            return
+        original = getattr(driver, "process_message", None)
+        if original is None:
+            return
+        from textual import events
+
+        app_ref = weakref.ref(self)
+
+        def process_message(message) -> None:
+            if isinstance(message, events.CursorPosition):
+                app = app_ref()
+                widget = app._device_screen() if app is not None else None
+                try:
+                    if widget is not None and widget._on_ack():
+                        return
+                except Exception:
+                    pass
+            original(message)
+
+        driver.process_message = process_message
+        driver._sandroid_device_ack = True
+
+    def _display(self, screen, renderable) -> None:
+        if self._device_screen_ref is None:
+            super()._display(screen, renderable)
+            return
+        self._device_paint_update = renderable
+        try:
+            super()._display(screen, renderable)
+        finally:
+            self._device_paint_update = None
+
+    def _end_update(self) -> None:
+        widget = self._device_screen()
+        if widget is not None:
+            try:
+                widget._after_textual_paint(self._device_paint_update)
+            except Exception as exc:  # never break Textual's output
+                widget._last_error = repr(exc)
+        super()._end_update()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Refuse every app-level action while the StartupScreen is up.
 
@@ -661,20 +772,22 @@ class SandroidTUI(App):
         ``M`` = mitm) must not start anything new.
 
         ``D`` (Devices) only opens from the main screen, never a second time,
-        and not while a text field has the focus (the letter is typed there).
+        and not while a text field or the focused device screen has the
+        focus (the letter is typed there). ``?`` (Help) is typed on the
+        focused device screen too.
         """
         if getattr(self, "_exit_started", False):
             return False
         if self._startup_screen_up():
             return False
         if action == "show_devices":
-            from textual.widgets import Input, TextArea
-
             return (
                 isinstance(self.screen, MainScreen)
                 and not self._devices_screen_open()
-                and not isinstance(self.focused, (Input, TextArea))
+                and not focus_takes_text(self.focused)
             )
+        if action == "show_help":
+            return not getattr(self.focused, "takes_text", False)
         if action in _MAIN_SCREEN_ONLY:
             # Label / Tracking keys: only with the main screen on top (a
             # modal or the help owns the keyboard).
@@ -779,6 +892,14 @@ class SandroidTUI(App):
             install_launch_hooks()
         except Exception as exc:
             logger.debug(f"Failed to install the identity SIM launch hooks: {exc}")
+        # Live device screen: every emulator Sandroid launches gets a gRPC
+        # endpoint (idempotent; skips itself without the ``screen`` extra).
+        try:
+            from sandroid.core.emulator_grpc import install_launch_hooks as _grpc_hooks
+
+            _grpc_hooks()
+        except Exception as exc:
+            logger.debug(f"Failed to install the device screen launch hooks: {exc}")
         self.call_later(self._check_devices_on_startup)
         self.call_later(self._show_welcome_if_first_run)
         # Pre-initialize command registry and package cache in background
@@ -1486,6 +1607,9 @@ class SandroidTUI(App):
             )
         except Exception:
             pass
+        # The live device screen's stream / input threads (never created
+        # here: only a service that exists is closed).
+        _close_device_screen_service()
         # Stop a running replay: its thread worker cannot be cancelled by
         # Textual and would otherwise keep tapping on the device (P2-H1).
         try:
@@ -1818,6 +1942,18 @@ class SandroidTUI(App):
         screen = self._get_main_screen()
         if screen is not None:
             screen.toggle_chat_panel()
+
+    def action_toggle_device(self) -> None:
+        """Ctrl+G: open + focus the live device screen column, or close it."""
+        screen = self._get_main_screen()
+        if screen is not None:
+            screen.toggle_device_panel()
+
+    def on_app_blur(self, _event) -> None:
+        """The terminal lost the focus: lift a touch held on the phone."""
+        screen = self._main_screen_in_stack()
+        if screen is not None:
+            screen.lift_device()
 
     def action_show_settings(self) -> None:
         """Show the settings screen."""
@@ -2822,6 +2958,7 @@ class SandroidTUI(App):
             "show_snapshots": self.action_open_snapshots,
             "toggle_log": self.action_toggle_log,
             "toggle_chat": self.action_toggle_chat,
+            "toggle_device": self.action_toggle_device,
             "lens_app": lambda: self.action_switch_lens("app"),
             "lens_network": lambda: self.action_switch_lens("network"),
             "lens_files": lambda: self.action_switch_lens("files"),

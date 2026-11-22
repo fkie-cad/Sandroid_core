@@ -40,10 +40,17 @@ def _write_reset_sequences() -> None:
     ``_ALT_SCREEN_EXIT``); the mode resets every time.
     """
     try:
+        # A kitty image of the device screen (Ctrl+G) would outlive the app.
+        from sandroid.tui.terminal_graphics import graphics_reset_sequence
+
+        graphics = graphics_reset_sequence()
+    except Exception:
+        graphics = ""
+    try:
         if _alt_screen_left["done"]:
-            sys.stdout.write(_MODE_RESETS)
+            sys.stdout.write(graphics + _MODE_RESETS)
         else:
-            sys.stdout.write(_RESET_SEQUENCES)
+            sys.stdout.write(graphics + _RESET_SEQUENCES)
             _alt_screen_left["done"] = True
         sys.stdout.flush()
     except Exception:

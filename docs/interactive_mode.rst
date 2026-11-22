@@ -93,6 +93,8 @@ everything else out of the way until you ask for it:
   opens the **log drawer** with the full activity log.
 - **AI Chat** (optional, ``Ctrl+Y``, experimental) docks under the lens,
   beside the Inspector: see :ref:`ai-chat`.
+- **Device screen** (optional, ``Ctrl+G``) shows the emulator's screen live
+  in a column right of the Inspector: see :ref:`device-screen`.
 
 Navigation
 ~~~~~~~~~~
@@ -118,13 +120,16 @@ Backtick (grave accent)     Toggle the log drawer
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
 ``Ctrl+Y``                  AI Chat under the lens (focus it; again: close)
 ``Shift+Up``/``Down``       AI Chat size: 30% / 50% / 70% / max
+``Ctrl+G``                  Device screen beside the Inspector (focus it --
+                            keys then go to the phone; again: close)
 ``Ctrl+B``                  Focus the active lens (e.g. after the chat)
 ``,``                       Settings
 ``D`` (Shift+D)             Devices screen (attach / start / stop devices)
 ``q`` / ``Ctrl+C``          Quit (asks first; ``Ctrl+Q`` too)
 ==========================  ==================================================
 
-``Esc`` in the AI Chat goes back to the lens; otherwise it closes the
+``Esc`` in the AI Chat or on the focused device screen goes back to the lens
+(both stay open); otherwise it closes the
 Inspector first, then the log drawer, then the AI Chat, then clears an
 applied lens filter, then turns an AI filter off (Network and Files); it
 never quits. The quit dialog always comes
@@ -792,6 +797,46 @@ Key                 Action
 ==================  =========================================================
 
 Press ``?`` for the authoritative, up-to-date list.
+
+.. _device-screen:
+
+Device Screen
+-------------
+
+``Ctrl+G`` opens a column right of the Inspector (both can be open) with the
+emulator's screen, live, inside a phone outline. The mouse always controls the
+phone, without taking the focus from the lens: a click is a tap, holding is a
+long press, dragging swipes, the wheel scrolls; clicks on the phone's frame do
+nothing. Under the phone, **Back · Home · Recents** are clickable words and a
+status line says what is going on (``live · 30 fps``, ``connecting``,
+``needs an emulator started by Sandroid``, ``install sandroid[screen]``,
+``emulator gone``).
+
+Keys go to the phone only while it has the focus: ``Ctrl+G`` focuses it (a
+second ``Ctrl+G`` closes it). Then typed text, ``Enter``, ``Backspace``,
+``Delete``, the arrow keys and a paste go to the device, ``F2`` is Home and
+``F3`` Recents; ``D``, ``?``, ``r`` and the other letter commands are typed,
+not run. ``Esc`` gives the focus back to the lens; the column stays open.
+
+The column is as wide as the phone needs to fill its height, up to 60 % of
+the window, and the lens always keeps 40 columns. When the phone would get
+fewer than 20 columns beside the Inspector, the one of the two opened earlier
+closes (the log says so). Whether the column is open is remembered.
+
+The stream runs only while the column is shown and the main screen is on top
+(a dialog, Help or the Devices screen pauses it). While a Rewind or a replay
+runs, input to the phone is locked; while Record or Tracking runs, nothing
+goes through the guest clipboard (text that cannot be typed as keys is
+refused with a one-line note).
+
+It needs the optional ``screen`` extra (``pip install 'sandroid[screen]'``)
+and an emulator started by Sandroid (from the Devices screen or ``--avd``),
+which then gets a gRPC endpoint (``tui.device_screen.grpc_on_launch``).
+Physical devices are not shown. The image uses the terminal's graphics:
+iTerm2 / WezTerm, kitty or sixel, else coloured half-block characters (always
+inside tmux and on Windows); ``tui.device_screen.backend`` forces one
+(``auto``, ``iterm``, ``kitty``, ``sixel``, ``halfblock``), ``max_fps``,
+``bezel`` and ``touch_marker`` tune it.
 
 .. _ai-chat:
 
