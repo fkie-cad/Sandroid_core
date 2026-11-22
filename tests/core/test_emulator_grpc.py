@@ -434,6 +434,11 @@ def test_no_extra_when_grpc_cannot_be_imported(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delitem(
         sys.modules, "sandroid.core.emulator_grpc.client", raising=False
     )
+    # ``from pkg import client`` returns the package attribute first: an
+    # earlier test that imported the real client (grpcio installed) left it.
+    import sandroid.core.emulator_grpc as emulator_grpc_pkg
+
+    monkeypatch.delattr(emulator_grpc_pkg, "client", raising=False)
     manager = FakeManager(_emu())
     svc = DeviceScreenService(device_manager=lambda: manager)
     sink = FakeSink()
