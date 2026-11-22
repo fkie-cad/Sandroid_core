@@ -1020,3 +1020,78 @@ def test_ui_state_key_is_plain_json(tmp_path) -> None:
     update_ui_state("device_screen", {"open": True}, path)
     assert json.loads(path.read_text()) == {"device_screen": {"open": True}}
     assert load_ui_state(path)["device_screen"]["open"] is True
+
+
+def _query_pty(monkeypatch, reply: bytes) -> tuple[str, list[object]]:
+    """Run query_terminal against a pty whose 'terminal' sends ``reply``.
+
+    Nobody reads the master side (a terminal that is not reading): the
+    restore must not wait for output to drain. Returns the replies and the
+    termios calls made: ``("set", when)`` / ``("flush", queue)``.
+    """
+    import os
+    import termios
+
+    if os.name == "nt":
+        pytest.skip("no pty on Windows")
+    master, slave = os.openpty()
+    path = os.ttyname(slave)
+    calls: list[object] = []
+    real_set, real_flush = termios.tcsetattr, termios.tcflush
+
+    def record_set(fd, when, attrs):
+        calls.append(("set", when))
+        return real_set(fd, when, attrs)
+
+    def record_flush(fd, queue):
+        calls.append(("flush", queue))
+        return real_flush(fd, queue)
+
+    monkeypatch.setattr(termios, "tcsetattr", record_set)
+    monkeypatch.setattr(termios, "tcflush", record_flush)
+    os.write(master, reply)
+    try:
+        out = terminal_graphics.query_terminal(
+            "\x1b[c", timeout=0.05, grace=0.05, tty_path=path
+        )
+    finally:
+        os.close(master)
+        os.close(slave)
+    return out, calls
+
+
+def test_query_keeps_typed_keys_when_the_terminal_answers(monkeypatch) -> None:
+    import termios
+
+    out, calls = _query_pty(monkeypatch, b"\x1b[?62;4;22c")
+    assert out.endswith("\x1b[?62;4;22c")
+    # restored without dropping input
+    assert calls[-1] == ("set", termios.TCSANOW)
+    assert not [c for c in calls if c[0] == "flush"]
+
+
+def test_query_flushes_late_replies_instead_of_leaking_keys(monkeypatch) -> None:
+    """No DA1 sentinel by the deadline: whatever is still coming (the rest
+    of the replies) must not reach Textual as keystrokes.
+    """
+    import termios
+
+    _out, calls = _query_pty(monkeypatch, b"\x1bP>|iTerm2 3.5")  # no DA1
+    assert ("set", termios.TCSAFLUSH) not in calls  # would wait for a drain
+    assert calls[-1] == ("flush", termios.TCIFLUSH)
+
+
+def test_terminal_is_not_queried_over_ssh_or_without_the_extra(monkeypatch) -> None:
+    import importlib.util
+
+    from sandroid.tui import launcher
+
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert launcher._may_query() is True
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 5000 10.0.0.2 22")
+    assert launcher._may_query() is False
+    monkeypatch.delenv("SSH_CONNECTION")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert launcher._may_query() is False

@@ -145,8 +145,9 @@ def run_tui(
 def _detect_terminal_graphics(config: object) -> None:
     """Ask the terminal which image protocol it speaks (device screen).
 
-    Runs once, before Textual owns the terminal: only on a TTY, at most
-    ~200 ms, never inside tmux. The result is cached in
+    Runs once, before Textual owns the terminal: only on a TTY with the
+    ``screen`` extra installed, not over SSH, never inside tmux; ~200 ms
+    (at most 500 ms when the terminal is slow to answer). The result is cached in
     :mod:`sandroid.tui.terminal_graphics` for the device screen (Ctrl+G).
     """
     try:
@@ -154,10 +155,29 @@ def _detect_terminal_graphics(config: object) -> None:
 
         cfg = getattr(getattr(config, "tui", None), "device_screen", None)
         preferred = str(getattr(cfg, "backend", "auto") or "auto")
-        caps = terminal_graphics.detect(preferred=preferred)
+        caps = terminal_graphics.detect(preferred=preferred, query=_may_query())
         logger.debug(f"device screen backend: {caps.backend} ({caps.reason})")
     except Exception:
         logger.debug("terminal graphics detection failed", exc_info=True)
+
+
+def _may_query() -> bool:
+    """Ask the terminal only when the device screen can stream at all.
+
+    Without the ``screen`` extra there is nothing to draw, and over SSH the
+    replies may come later than the wait (they would reach Textual as
+    keystrokes); both use the environment only (``tui.device_screen.backend``
+    still forces a backend).
+    """
+    import importlib.util
+    import os
+
+    if os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"):
+        return False
+    try:
+        return importlib.util.find_spec("grpc") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _close_device_screen() -> None:

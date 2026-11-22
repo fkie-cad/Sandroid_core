@@ -36,6 +36,10 @@ KITTY_PLACEMENT_ID = 1
 KITTY_DELETE = "\x1b_Ga=d,d=i,i=%d,q=2\x1b\\" % KITTY_IMAGE_ID
 #: Total time the pre-run terminal query may take.
 QUERY_TIMEOUT_S = 0.2
+#: Extra wait for the DA1 sentinel after QUERY_TIMEOUT_S. If it still has not
+#: come, pending input is flushed: a late reply would otherwise reach Textual
+#: as keystrokes (``\x1b[?62;4c`` parses as ``[ ? 6 2 ...`` key events).
+QUERY_GRACE_S = 0.3
 #: Textual versions whose private paint hooks the graphics backends rely on
 #: (``App._display`` / ``_end_update``, the compositor's visible widgets, the
 #: driver's writer queue). Other versions get the half-block backend.
@@ -90,7 +94,12 @@ def set_result(caps: TermGraphics | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def query_terminal(queries: str, timeout: float = QUERY_TIMEOUT_S) -> str:
+def query_terminal(
+    queries: str,
+    timeout: float = QUERY_TIMEOUT_S,
+    grace: float = QUERY_GRACE_S,
+    tty_path: str = "/dev/tty",
+) -> str:
     """Write ``queries`` to the controlling tty, collect the replies.
 
     Reads until the DA1 reply (the sentinel: terminals answer in order, so
@@ -100,7 +109,10 @@ def query_terminal(queries: str, timeout: float = QUERY_TIMEOUT_S) -> str:
 
     Args:
         queries: Escape sequences to send (end with DA1, ``CSI c``).
-        timeout: Seconds to wait in total.
+        timeout: Seconds a normal answer may take.
+        grace: Extra seconds to wait for the DA1 sentinel; without it by
+            then, pending input is flushed (late replies are not keys).
+        tty_path: The terminal device (tests pass a pty).
 
     Returns:
         The raw replies (latin-1 decoded).
@@ -112,7 +124,7 @@ def query_terminal(queries: str, timeout: float = QUERY_TIMEOUT_S) -> str:
     import tty
 
     try:
-        fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+        fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
     except OSError:
         return ""
     buf = b""
@@ -121,10 +133,13 @@ def query_terminal(queries: str, timeout: float = QUERY_TIMEOUT_S) -> str:
             old = termios.tcgetattr(fd)
         except termios.error:
             return ""
+        sentinel = re.compile(rb"\x1b\[\?[\d;]*c")
+        done = False
         try:
             tty.setraw(fd, termios.TCSANOW)
             os.write(fd, queries.encode())
-            deadline = time.monotonic() + timeout
+            start = time.monotonic()
+            deadline = start + timeout + grace
             while True:
                 left = deadline - time.monotonic()
                 if left <= 0:
@@ -136,11 +151,18 @@ def query_terminal(queries: str, timeout: float = QUERY_TIMEOUT_S) -> str:
                 if not chunk:
                     break
                 buf += chunk
-                if re.search(rb"\x1b\[\?[\d;]*c", buf):
+                if sentinel.search(buf):
+                    done = True
                     break
         finally:
-            # TCSANOW: TCSAFLUSH would drop keys typed during startup.
+            # TCSANOW keeps keys typed during startup; only when the replies
+            # did not all arrive is pending input dropped (it may hold the
+            # rest of them, which Textual would read as keystrokes). Never
+            # TCSAFLUSH: it first waits for output to drain, which hangs
+            # startup on a terminal that is not reading.
             termios.tcsetattr(fd, termios.TCSANOW, old)
+            if not done:
+                termios.tcflush(fd, termios.TCIFLUSH)
     except Exception:
         return buf.decode("latin-1")
     finally:
