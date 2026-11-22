@@ -880,3 +880,31 @@ def test_service_module_imports_without_grpc() -> None:
     # The service module and the support module never import grpc themselves.
     assert dss.DeviceScreenService is DeviceScreenService
     assert "grpc" not in support.__dict__
+
+
+def test_client_import_disables_grpc_fork_handlers_and_logging() -> None:
+    """The client turns grpc's fork handlers and logging off before import.
+
+    gRPC core's fork handlers slow every adb fork and once aborted one before
+    exec; its logs go to stderr, where Textual draws. Checked in a fresh
+    interpreter: grpc reads both once at init.
+    """
+    pytest.importorskip("grpc")
+    import os
+    import subprocess
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("GRPC_ENABLE_FORK_SUPPORT", "GRPC_VERBOSITY")
+    }
+    code = (
+        "import os, sandroid.core.emulator_grpc.client\n"
+        "from grpc._cython import cygrpc\n"
+        "print(os.environ['GRPC_ENABLE_FORK_SUPPORT'],"
+        " os.environ['GRPC_VERBOSITY'], cygrpc.is_fork_support_enabled())"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
+    assert out.stdout.split() == ["0", "NONE", "False"], out.stderr

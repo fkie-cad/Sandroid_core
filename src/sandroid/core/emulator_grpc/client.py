@@ -20,8 +20,17 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-# grpc logs to stderr, where Textual draws its UI.
-os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+# Both must be set before grpc is imported (gRPC core reads them at init).
+# grpc logs to stderr, where Textual draws its UI: errors arrive as status
+# codes, so nothing needs to be printed.
+os.environ.setdefault("GRPC_VERBOSITY", "NONE")
+# gRPC core's fork handlers are on by default in grpcio wheels. Sandroid
+# forks adb/emulator subprocesses all the time: with the handlers on, every
+# fork logs, forks run ~2.4x slower (measured 204/s vs 465/s), and a fork
+# during stream activity aborted the child before exec ("Check failed:
+# wakeup_fd_->ConsumeWakeup().ok()" from an adb call). The children exec
+# right away and never use gRPC, so the handlers are not needed.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 
 import grpc
 from google.protobuf import empty_pb2
