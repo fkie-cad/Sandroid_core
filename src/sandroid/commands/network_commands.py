@@ -1,4 +1,4 @@
-"""Network commands for FriTap, proxy, and network capture."""
+"""Network commands for friTap, proxy, and network capture."""
 
 import logging
 
@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
-    """Command to start/stop FriTap SSL/TLS interception.
+    """Command to start/stop friTap SSL/TLS interception.
 
-    FriTap intercepts SSL/TLS traffic from the spotlight application,
+    friTap intercepts SSL/TLS traffic from the spotlight application,
     capturing encrypted network communications for analysis. It provides:
     - SSL/TLS key extraction (SSLKEYLOGFILE format)
     - Connection data logging (source/dest IPs, ports, data)
     - JSON output for structured analysis
 
-    This is a toggle command - pressing the key starts FriTap if not running,
+    This is a toggle command - pressing the key starts friTap if not running,
     or stops it if already running.
 
     Note: is_blocking_io=True because Frida's attach/spawn operations conflict
@@ -40,8 +40,8 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
     """
 
     key = "h"
-    name = "FriTap"
-    description = "Start/stop FriTap SSL/TLS interception"
+    name = "friTap"
+    description = "Start/stop friTap SSL/TLS interception"
     category = CommandCategory.NETWORK
     views = ["forensic", "malware", "security"]
 
@@ -49,7 +49,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
     is_blocking_io = True
 
     def execute_blocking(self, ctx: CommandContext) -> CommandResult:
-        """Execute FriTap command synchronously (blocking I/O path).
+        """Execute friTap command synchronously (blocking I/O path).
 
         This method is called directly from worker threads without asyncio.run()
         to avoid conflicts with Frida's internal threading model.
@@ -63,10 +63,10 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
         return "fritap"
 
     def is_task_running(self, ctx: CommandContext) -> bool:
-        """Check if FriTap is currently running.
+        """Check if friTap is currently running.
 
         Checks TaskService first, then falls back to FridaSessionService
-        to detect running FriTap even if registration failed.
+        to detect running friTap even if registration failed.
         """
         # Check context TaskService, then global TaskService
         if ctx.task_service and ctx.task_service.is_running("fritap"):
@@ -75,7 +75,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
         if get_task_service().is_running("fritap"):
             return True
 
-        # Fallback: Check FridaSessionService for active FriTap jobs
+        # Fallback: Check FridaSessionService for active friTap jobs
         try:
             from sandroid.services import get_frida_session_service
 
@@ -90,9 +90,9 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
         return False
 
     def can_execute(self, ctx: CommandContext) -> tuple[bool, str]:
-        """Check preconditions for FriTap execution.
+        """Check preconditions for friTap execution.
 
-        When starting FriTap, requires:
+        When starting friTap, requires:
         - Task service available
         - A spotlight app to be selected
         - Frida server to be running
@@ -123,9 +123,9 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
         return True, ""
 
     def _start_fritap(self, ctx: CommandContext) -> CommandResult:
-        """Start FriTap SSL/TLS interception.
+        """Start friTap SSL/TLS interception.
 
-        Creates a FriTap instance, shows configuration dialog,
+        Creates a friTap instance, shows configuration dialog,
         and starts interception on the spotlight application.
         This method is shared between sync and async execution paths.
         """
@@ -141,7 +141,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
 
             app_info = get_spotlight_service().get_app_tuple()
             app_name = app_info[0] if app_info else "unknown"
-            logger.info(f"Starting FriTap for {app_name}")
+            logger.info(f"Starting friTap for {app_name}")
 
             fritap = FriTap()
             success = fritap.start(interactive=True)
@@ -155,7 +155,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                     )
                 return CommandResult(
                     success=False,
-                    message="FriTap startup cancelled or failed",
+                    message="friTap startup cancelled or failed",
                     error="User cancelled configuration or startup error occurred",
                 )
 
@@ -164,7 +164,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                 # friTap already stopped itself -- don't register a dead task.
                 return CommandResult(
                     success=False,
-                    message=f"FriTap target is gone ({fritap.target_gone})",
+                    message=f"friTap target is gone ({fritap.target_gone})",
                     error=str(fritap.target_gone),
                 )
 
@@ -173,19 +173,19 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             try:
                 task_service.register(
                     name="fritap",
-                    display_name="FriTap",
+                    display_name="friTap",
                     instance=fritap,
                     stop_callback=fritap.stop,
                     app_name=fritap.app_package,
                     target_pid=fritap.process_id,
                 )
                 logger.debug(
-                    f"FriTap registered with TaskService (pid={fritap.process_id})"
+                    f"friTap registered with TaskService (pid={fritap.process_id})"
                 )
             except Exception as e:
                 logger.error(
-                    f"Failed to register FriTap with TaskService: {e}. "
-                    f"FriTap is running (job_id={fritap.job_id}) but menu state may be incorrect."
+                    f"Failed to register friTap with TaskService: {e}. "
+                    f"friTap is running (job_id={fritap.job_id}) but menu state may be incorrect."
                 )
 
             # Collect output file paths
@@ -198,7 +198,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             return CommandResult(
                 success=True,
                 message=(
-                    f"FriTap started for {fritap.app_package} "
+                    f"friTap started for {fritap.app_package} "
                     f"(PID: {fritap.process_id})"
                     + (
                         f" · {note}"
@@ -216,10 +216,10 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             )
 
         except ImportError as e:
-            logger.error(f"Failed to import FriTap: {e}")
+            logger.error(f"Failed to import friTap: {e}")
             return CommandResult(
                 success=False,
-                message="FriTap module not available",
+                message="friTap module not available",
                 error=f"Import error: {e}. Is friTap installed?",
             )
         except Exception as e:
@@ -239,7 +239,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                 # injected): the message is the whole story, no traceback.
                 logger.error(f"friTap did not start: {reason}")
             else:
-                logger.exception("Error starting FriTap")
+                logger.exception("Error starting friTap")
             return CommandResult(
                 success=False,
                 message=f"friTap did not start: {reason}",
@@ -247,7 +247,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             )
 
     def _stop_fritap(self, ctx: CommandContext) -> CommandResult:
-        """Stop FriTap SSL/TLS interception.
+        """Stop friTap SSL/TLS interception.
 
         Uses dual-path cleanup: TaskService for registered tasks,
         JobManager directly for unregistered/orphaned sessions.
@@ -258,10 +258,10 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             task_service = ctx.task_service or get_task_service()
             if task_service.is_running("fritap"):
                 task_service.stop("fritap")
-                logger.info("FriTap stopped via TaskService")
+                logger.info("friTap stopped")
                 return CommandResult(
                     success=True,
-                    message="FriTap stopped",
+                    message="friTap stopped",
                     data={"action": "stopped"},
                 )
 
@@ -278,7 +278,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                     if job_info.get("job_type") == "fritap":
                         job_id = job_info.get("job_id")
                         if job_id:
-                            logger.info(f"Stopping orphaned FriTap job {job_id[:8]}...")
+                            logger.info(f"Stopping orphaned friTap job {job_id[:8]}...")
                             try:
                                 job_manager.stop_job_with_id(job_id, timeout=3.0)
                                 stopped_any = True
@@ -294,30 +294,30 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                             pass
                     return CommandResult(
                         success=True,
-                        message="FriTap stopped",
+                        message="friTap stopped",
                         data={"action": "stopped"},
                     )
 
             return CommandResult(
                 success=False,
-                message="FriTap is not running",
-                error="No active FriTap session found",
+                message="friTap is not running",
+                error="No active friTap session found",
             )
 
         except Exception as e:
-            logger.exception("Error stopping FriTap")
+            logger.exception("Error stopping friTap")
             return CommandResult(
                 success=False,
-                message=f"Error stopping FriTap: {e!s}",
+                message=f"Error stopping friTap: {e!s}",
                 error=str(e),
             )
 
     async def start_task(self, ctx: CommandContext) -> CommandResult:
-        """Start FriTap SSL/TLS interception (async wrapper)."""
+        """Start friTap SSL/TLS interception (async wrapper)."""
         return self._start_fritap(ctx)
 
     async def stop_task(self, ctx: CommandContext) -> CommandResult:
-        """Stop FriTap SSL/TLS interception (async wrapper)."""
+        """Stop friTap SSL/TLS interception (async wrapper)."""
         return self._stop_fritap(ctx)
 
 

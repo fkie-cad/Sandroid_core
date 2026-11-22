@@ -1,6 +1,6 @@
 """Headless network capture mode dispatcher for Sandroid.
 
-Runs network traffic capture with optional FriTap integration in headless mode.
+Runs network traffic capture with optional friTap integration in headless mode.
 """
 
 import asyncio
@@ -23,17 +23,17 @@ def run_network_headless(
     with_fritap: str | None,
     output_file: str | None,
 ) -> None:
-    """Run headless network capture with optional FriTap integration.
+    """Run headless network capture with optional friTap integration.
 
     Captures network traffic for the specified duration, analyzes the resulting
     PCAP file, and outputs structured JSON results. Optionally combines capture
-    with FriTap SSL/TLS key extraction for a specified package.
+    with friTap SSL/TLS key extraction for a specified package.
 
     Args:
         sandroid_config: Loaded Sandroid configuration.
         active_logger: Configured logger instance.
         duration: Capture duration in seconds (minimum 5).
-        with_fritap: Optional package name for FriTap SSL keylog integration.
+        with_fritap: Optional package name for friTap SSL keylog integration.
         output_file: Optional output file path for JSON results.
 
     Raises:
@@ -73,7 +73,7 @@ def run_network_headless(
             f"[accent]Starting headless network capture for {duration}s...[/accent]"
         )
         if with_fritap:
-            console.print(f"[dim]FriTap SSL keylog enabled for: {with_fritap}[/dim]")
+            console.print(f"[dim]friTap SSL keylog enabled for: {with_fritap}[/dim]")
 
         api = SandroidHeadlessAPI(config=sandroid_config)
         api._initialized = True

@@ -125,7 +125,7 @@ class FridaDeviceManager:
                 return self._cached_device
             self._logger.warning(
                 "Frida device not pre-initialized. Cannot init from worker thread. "
-                "FriTap may not work. Restart sandroid with a connected device."
+                "friTap may not work. Restart sandroid with a connected device."
             )
             return None
 

@@ -229,7 +229,7 @@ TRIGDROID_REMOVED_MESSAGE = (
 @click.option(
     "--dexray-fritap",
     is_flag=True,
-    help="Enable built-in FriTap during dexray monitoring",
+    help="Enable built-in friTap during dexray monitoring",
 )
 @click.option(
     "--proxy",
@@ -280,7 +280,7 @@ TRIGDROID_REMOVED_MESSAGE = (
     type=str,
     metavar="PACKAGE",
     default=None,
-    help="Start FriTap SSL/TLS key extraction for PACKAGE (headless mode). Runs until Ctrl+C.",
+    help="Start friTap SSL/TLS key extraction for PACKAGE (headless mode). Runs until Ctrl+C.",
 )
 @click.option(
     "--fridump",
@@ -300,7 +300,7 @@ TRIGDROID_REMOVED_MESSAGE = (
     type=str,
     metavar="PACKAGE",
     default=None,
-    help="Combine network capture with FriTap SSL keylog for PACKAGE (headless network mode only)",
+    help="Combine network capture with friTap SSL keylog for PACKAGE (headless network mode only)",
 )
 @click.version_option(version=__version__, prog_name="sandroid")
 def main(

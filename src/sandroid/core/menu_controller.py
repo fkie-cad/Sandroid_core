@@ -391,11 +391,11 @@ class MenuController:
         )
         self._register(
             "fritap",
-            "Start/stop FriTap hooking",
+            "Start/stop friTap hooking",
             "h",
             ActionCategory.NETWORK,
             ["malware"],
-            description="TLS interception with FriTap",
+            description="TLS interception with friTap",
             inline_text="start friTap [h]ooking",
             requires_spotlight=True,
             requires_frida=True,

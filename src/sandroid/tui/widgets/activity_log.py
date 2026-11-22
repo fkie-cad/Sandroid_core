@@ -141,8 +141,8 @@ class ActivityLog(RichLog):
         """True if ``message`` was already shown within ``DEDUP_WINDOW``.
 
         Many tools reach the log twice or three times -- e.g. every friTap
-        line arrives as task output ("FriTap: x"), as its own Python log
-        record ("INFO: x") and with its "[*] " prefix ("FriTap: [*] x").
+        line arrives as task output ("friTap: x"), as its own Python log
+        record ("INFO: x") and with its "[*] " prefix ("friTap: [*] x").
         Level, source label and "[*]"/"[+]" prefixes are ignored when
         comparing, so only the first copy is shown.
         """
@@ -398,6 +398,8 @@ class ActivityLog(RichLog):
         """
         if self._is_repeat(message):
             return
+        # friTap's "[*] " / "[+] " markers are not words: shown without them.
+        message = self._TOOL_PREFIX_RE.sub("", str(message).lstrip())
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
         message = self._level_colored(message, colors)
@@ -419,14 +421,14 @@ class ActivityLog(RichLog):
         """
         if app_name:
             self.write(
-                f"[{fixed_color('running')} bold]>>> Started: {task_name} on {app_name}[/]"
+                f"[{fixed_color('running')} bold]Started: {task_name} on {app_name}[/]"
             )
         else:
-            self.write(f"[{fixed_color('running')} bold]>>> Started: {task_name}[/]")
+            self.write(f"[{fixed_color('running')} bold]Started: {task_name}[/]")
 
     def log_task_updated(self, task_name: str) -> None:
         """Log a task display-name change (not a restart)."""
-        self.write(f"[{fixed_color('running')}][~] {task_name}[/]")
+        self.write(f"[{fixed_color('running')}]Running: {task_name}[/]")
 
     def log_task_stopped(self, task_name: str) -> None:
         """Log a task stopped event.
@@ -438,7 +440,7 @@ class ActivityLog(RichLog):
         Args:
             task_name: Name of the task
         """
-        line = f"<<< Stopped: {task_name}"
+        line = f"Stopped: {task_name}"
         if self._is_repeat(line):
             return
         muted = self._get_theme_colors()["text_muted"]

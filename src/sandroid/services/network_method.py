@@ -142,16 +142,31 @@ class MethodView:
                 text += " " + _sentence(part)
         return text
 
-    def markup(self, ok: str, warn: str, bad: str, dim: str) -> str:
-        """The status line in Rich markup (theme colours, no glyphs)."""
+    @property
+    def status_notes(self) -> tuple[str, ...]:
+        """Notes that are tool state, not the method: "CA installed",
+        "Mitmproxy running", the pinning and SDK-runtime notes. The Network
+        lens shows them on the Inspector's Network status page, not on its
+        method line (N3-V2); the Proxy dialog shows the full line.
+        """
+        return tuple(n for n in self.notes if _is_status_note(n))
+
+    def markup(
+        self, ok: str, warn: str, bad: str, dim: str, *, brief: bool = False
+    ) -> str:
+        """The status line in Rich markup (theme colours, no glyphs).
+
+        ``brief``: leave out :attr:`status_notes` (the Network lens line).
+        """
         from rich.markup import escape
 
         colour = bad if self.problems else (warn if self.preset == CUSTOM else ok)
         text = f"[{dim}]Network method:[/] [{colour}]{escape(self.name)}[/]."
         if self.covered:
             text += " " + escape(_sentence(self.covered))
-        if self.notes:
-            text += f" [{dim}]{escape(_sentence(self.notes))}[/]"
+        notes = [n for n in self.notes if not (brief and _is_status_note(n))]
+        if notes:
+            text += f" [{dim}]{escape(_sentence(tuple(notes)))}[/]"
         if self.problems:
             text += f" [{bad}]{escape(_sentence(self.problems))}[/]"
         return text
@@ -171,6 +186,17 @@ class MethodView:
 def _sentence(parts: tuple[str, ...]) -> str:
     text = ", ".join(parts)
     return text[:1].upper() + text[1:] + "."
+
+
+def _is_status_note(note: str) -> bool:
+    """A note about tool state rather than about the method (see
+    :attr:`MethodView.status_notes`).
+    """
+    return note in (
+        "CA installed",
+        "Mitmproxy running",
+        "SDK sandbox traffic has no app name",
+    ) or note.startswith("pinning ")
 
 
 def _pinning_note(s: MethodSnapshot) -> str:
@@ -283,7 +309,7 @@ def derive_method(s: MethodSnapshot) -> MethodView:
         if s.attribution == "on":
             # SDK runtime processes (UID 20000+) are refused by the Kill
             # switch but get no relay identity of their own.
-            notes.insert(0, "SDK runtime processes not named")
+            notes.insert(0, "SDK sandbox traffic has no app name")
         if s.ca == "installed":
             notes.insert(0, "CA installed")
         return MethodView(
@@ -502,7 +528,7 @@ def plan_apply(
 
 
 def keys_only_available() -> bool:
-    """FriTap has its non-interactive keys-only start (always on this build)."""
+    """True: friTap has its non-interactive keys-only start (always here)."""
     from sandroid.analysis import fritap
 
     return callable(getattr(fritap, "start_fritap_keys", None))

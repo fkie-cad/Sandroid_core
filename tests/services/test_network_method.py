@@ -149,6 +149,34 @@ def test_status_line_words_and_colours_only():
         assert " arm" not in text.replace("armed", "")
 
 
+def test_brief_line_leaves_tool_state_notes_to_the_status_page():
+    """N3-V2: the Network lens line said "CA installed, SDK runtime processes
+    not named, pinning not bypassed" under a title that showed the CA too.
+    The brief line keeps the method and its own notes; the tool-state notes
+    are :attr:`MethodView.status_notes` (the Inspector's status page).
+    """
+    view = nm.derive_method(WHOLE)
+    full = view.line()
+    assert "CA installed" in full
+    assert "pinning not bypassed" in full
+    brief = view.markup("#0f0", "#ff0", "#f00", "#888", brief=True)
+    for note in ("CA installed", "SDK sandbox traffic has no app name", "pinning"):
+        assert note not in brief
+    assert "Whole device" in brief
+    assert set(view.status_notes) == {
+        "CA installed",
+        "SDK sandbox traffic has no app name",
+        "pinning not bypassed",
+    }
+    # Method notes stay on the brief line (they describe the method).
+    off = nm.derive_method(replace(BASE, mitm_running=False, ca="unknown"))
+    assert "Nothing is routed through Mitmproxy" in off.markup(
+        "#0f0", "#ff0", "#f00", "#888", brief=True
+    )
+    this_app = nm.derive_method(THIS)
+    assert "QUIC" in this_app.markup("#0f0", "#ff0", "#f00", "#888", brief=True)
+
+
 # -- apply plans ---------------------------------------------------------------------
 
 
@@ -970,7 +998,7 @@ def test_status_line_never_claims_apps_named_when_some_are_not():
     assert "Kill switch covers IPv4 only (no ip6tables on the device)" in v4.problems
     ok = nm.derive_method(WHOLE)
     assert "apps named" in ok.covered
-    assert "SDK runtime processes not named" in ok.notes
+    assert "SDK sandbox traffic has no app name" in ok.notes
     for view in (partial, failed, direct, v4, ok):
         assert not _GLYPHS.search(view.line())
         assert " arm" not in view.line()

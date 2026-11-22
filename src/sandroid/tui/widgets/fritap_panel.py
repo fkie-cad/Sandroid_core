@@ -31,6 +31,7 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import re
 import subprocess
 import sys
 import webbrowser
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
+
+
+#: friTap's own line markers ("[*] ", "[+] ", "[!] ", "[-] "), not words.
+_MARKER_RE = re.compile(r"^(?:\[[*+!-]\]\s*)+")
+#: How many of the newest Recent lines a repeat is checked against.
+_DEDUP_LINES = 8
 
 
 class FriTapPanel(Widget):
@@ -161,7 +168,7 @@ class FriTapPanel(Widget):
         """Handle a TASK_OUTPUT event (runs on the UI thread).
 
         Source-only match: another task that happens to emit the same
-        ``task_name`` ("FriTap") must not leak into this panel, so we filter on
+        ``task_name`` ("friTap") must not leak into this panel, so we filter on
         ``event.source == "fritap"`` and nothing else.
         """
         if getattr(event, "source", None) != "fritap":
@@ -193,14 +200,28 @@ class FriTapPanel(Widget):
     def _append_line(self, line: str) -> None:
         # A fresh session resets the glance counters (the engine emits this
         # sentinel only when activity-log output is enabled).
-        if "FriTap started for" in line:
+        if "friTap started for" in line:
             self._keys = self._datalog = self._errors = 0
 
         stripped, was_error, was_warning = self._strip_pseudo_tags(line)
+        # friTap reports many lines twice (its "[*] " print and its log
+        # record) and repeats hook notes per loaded library: a line already
+        # among the last few is not listed (nor counted) again (N3).
+        stripped = _MARKER_RE.sub("", stripped.strip())
+        if not stripped or stripped in list(self.recent_lines)[-_DEDUP_LINES:]:
+            return
+        if any(
+            r.endswith(stripped) and r[:2] in ("✗ ", "! ")
+            for r in list(self.recent_lines)[-_DEDUP_LINES:]
+        ):
+            return
 
         # Prefix/substring dispatch. Shapes come from fritap_formatter.py:
-        # keylog "🔑 …", datalog "… (N bytes)", error "ERROR: …".
-        if "🔑" in stripped:
+        # keylog "TLS key …" (older engines: "🔑 …"), datalog "… (N bytes)",
+        # error "ERROR: …". A key emoji is shown as the words (N3-V4).
+        if stripped.startswith("🔑"):
+            stripped = "TLS key" + stripped[1:].rstrip()
+        if stripped.startswith("TLS key"):
             self._keys += 1
         elif "bytes)" in stripped:
             self._datalog += 1
@@ -218,8 +239,8 @@ class FriTapPanel(Widget):
     @staticmethod
     def _check_tag(label: str, ok: bool) -> str:
         if ok:
-            return f"[#4ade80]{label} ✓[/]"
-        return f"[#5b6479]{label} ○[/]"
+            return f"[#4ade80]{label} ● on[/]"
+        return f"[#5b6479]{label} ○ off[/]"
 
     @staticmethod
     def _phase() -> tuple[str, str]:
@@ -232,8 +253,10 @@ class FriTapPanel(Widget):
             return "stopped", ""
 
     def caption_token(self) -> str:
-        """The lens caption's friTap fragment ("" while cleanly stopped), in
-        words and theme colours.
+        """The lens caption's friTap fragment in words and theme colours:
+        a problem or a transition (starting, stopping, failed, not
+        responding), ``friTap ● running`` (the status bar does not name
+        friTap), ``""`` while cleanly stopped.
         """
         from sandroid.tui.themes import lens_palette
 
@@ -253,6 +276,8 @@ class FriTapPanel(Widget):
             return ""
         if phase == "hung":
             return f"[{pal.warn}]friTap app not responding[/]"
+        # Kept from main (R3): the status bar names Mitmproxy but not friTap
+        # (only "Hooks N"), so the title says friTap runs.
         return f"[{pal.ok}]friTap ● running[/]"  # like Mitmproxy's (R3)
 
     @staticmethod
@@ -397,7 +422,7 @@ class FriTapPanel(Widget):
     # -- actions ----------------------------------------------------------
 
     def action_toggle_running(self) -> None:
-        """Enter — delegate Start/Stop to the existing FriTap command (key h).
+        """Enter — delegate Start/Stop to the existing friTap command (key h).
 
         The command owns ALL preconditions (frida-server up, spotlight app),
         the config modal, task registration, the paused-spawn guard, and the
@@ -409,7 +434,7 @@ class FriTapPanel(Widget):
         try:
             self.app.action_action_key("h")
         except Exception as exc:
-            logger.warning("FriTap toggle failed: %s", exc)
+            logger.warning("friTap toggle failed: %s", exc)
         self.refresh_header()
 
     def action_clear_log(self) -> None:
@@ -418,7 +443,7 @@ class FriTapPanel(Widget):
         self.refresh_header()
 
     def action_open_output(self) -> None:
-        """Ctrl+O — open the friTap results folder in the OS file manager."""
+        """Ctrl+F — open the friTap results folder in the OS file manager."""
         folder = self._output_folder()
         if folder is None or not folder.exists():
             try:

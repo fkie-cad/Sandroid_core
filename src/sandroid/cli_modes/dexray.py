@@ -47,7 +47,7 @@ def run_dexray_headless(
         hook_groups: Optional comma-separated hook group names
             (e.g. "aes,socket,filesystem").  When *None*, the
             MalwareMonitor defaults are used.
-        enable_fritap: Enable FriTap TLS key extraction alongside
+        enable_fritap: Enable friTap TLS key extraction alongside
             dexray-intercept hooks.
 
     Raises:
@@ -145,7 +145,7 @@ def run_dexray_headless(
         _print_active_hooks(monitor, console)
 
         if enable_fritap:
-            console.print("[dim]FriTap TLS key extraction enabled[/dim]")
+            console.print("[dim]friTap TLS key extraction enabled[/dim]")
 
         console.print("[dim]Press Ctrl+C to stop (press twice to force exit)...[/dim]")
         console.print(

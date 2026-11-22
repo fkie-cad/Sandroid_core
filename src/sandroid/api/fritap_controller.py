@@ -1,7 +1,7 @@
-"""FriTap controller for the Sandroid Headless API.
+"""friTap controller for the Sandroid Headless API.
 
-Encapsulates all FriTap SSL/TLS key extraction operations including
-starting, stopping, and status checking of FriTap sessions.
+Encapsulates all friTap SSL/TLS key extraction operations including
+starting, stopping, and status checking of friTap sessions.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 class HeadlessFriTapController:
-    """Manages FriTap lifecycle for headless API usage.
+    """Manages friTap lifecycle for headless API usage.
 
-    This controller handles starting and stopping FriTap SSL/TLS key
+    This controller handles starting and stopping friTap SSL/TLS key
     extraction sessions, including spotlight app configuration, task
     registration, and graceful shutdown with timeout support.
 
@@ -60,13 +60,13 @@ class HeadlessFriTapController:
         json_output: str | None = None,
         fresh: bool = False,
     ) -> CommandResult:
-        """Start FriTap SSL/TLS key extraction (non-blocking).
+        """Start friTap SSL/TLS key extraction (non-blocking).
 
-        FriTap intercepts SSL/TLS traffic from the target application,
+        friTap intercepts SSL/TLS traffic from the target application,
         capturing encryption keys for traffic decryption. Runs until
         stop() or API shutdown is called.
 
-        This method returns immediately after starting the FriTap job.
+        This method returns immediately after starting the friTap job.
         Hook loading happens asynchronously in a background thread.
 
         Note:
@@ -110,9 +110,9 @@ class HeadlessFriTapController:
                     error="Provide package parameter or set spotlight app first",
                 )
 
-            logger.info(f"Starting FriTap for {effective_package}")
+            logger.info(f"Starting friTap for {effective_package}")
 
-            # Create and start FriTap
+            # Create and start friTap
             fritap = FriTap()
 
             # Configure output paths if provided
@@ -130,8 +130,8 @@ class HeadlessFriTapController:
             if not success:
                 return CommandResult(
                     success=False,
-                    message="FriTap startup failed",
-                    error="Could not start FriTap - check Frida server is running",
+                    message="friTap startup failed",
+                    error="Could not start friTap - check Frida server is running",
                 )
 
             # Register with TaskService
@@ -139,14 +139,14 @@ class HeadlessFriTapController:
             try:
                 task_service.register(
                     name="fritap",
-                    display_name="FriTap",
+                    display_name="friTap",
                     instance=fritap,
                     stop_callback=fritap.stop,
                     app_name=fritap.app_package,
                     target_pid=fritap.process_id,
                 )
             except Exception as e:
-                logger.warning(f"FriTap task registration failed: {e}")
+                logger.warning(f"friTap task registration failed: {e}")
 
             # Collect output paths
             output_files = []
@@ -158,7 +158,7 @@ class HeadlessFriTapController:
             return CommandResult(
                 success=True,
                 message=(
-                    f"FriTap job started for {fritap.app_package} "
+                    f"friTap job started for {fritap.app_package} "
                     f"(PID: {fritap.process_id}) - hooks loading in background"
                 ),
                 data={
@@ -172,21 +172,21 @@ class HeadlessFriTapController:
         except ImportError as e:
             return CommandResult(
                 success=False,
-                message="FriTap not available",
+                message="friTap not available",
                 error=f"Import error: {e}. Is friTap installed?",
             )
         except Exception as e:
-            logger.exception("Error starting FriTap")
+            logger.exception("Error starting friTap")
             return CommandResult(
                 success=False,
-                message=f"FriTap error: {e}",
+                message=f"friTap error: {e}",
                 error=str(e),
             )
 
     async def stop(self, timeout: float = 5.0) -> CommandResult:
-        """Stop FriTap SSL/TLS key extraction.
+        """Stop friTap SSL/TLS key extraction.
 
-        Stops FriTap gracefully and returns information about captured data.
+        Stops friTap gracefully and returns information about captured data.
         Uses timeout to prevent hanging if Frida connection is broken.
 
         Args:
@@ -220,7 +220,7 @@ class HeadlessFriTapController:
                 try:
                     task_service.stop("fritap")
                     stopped = True
-                    logger.info("FriTap stopped via TaskService")
+                    logger.info("friTap stopped via TaskService")
                 except Exception as e:
                     logger.warning(f"TaskService stop failed: {e}")
 
@@ -240,7 +240,7 @@ class HeadlessFriTapController:
                                         )
                                         stopped = True
                                         logger.info(
-                                            f"FriTap stopped via JobManager "
+                                            f"friTap stopped via JobManager "
                                             f"(job_id={job_id[:8]})"
                                         )
                                     except Exception as e:
@@ -260,7 +260,7 @@ class HeadlessFriTapController:
                     stopped, output_files = future.result(timeout=timeout)
                 except concurrent.futures.TimeoutError:
                     logger.warning(
-                        f"FriTap stop timed out after {timeout}s - force stopping"
+                        f"friTap stop timed out after {timeout}s - force stopping"
                     )
                     # Force cleanup - the connection is likely broken
                     stopped = True
@@ -269,29 +269,29 @@ class HeadlessFriTapController:
             if stopped:
                 return CommandResult(
                     success=True,
-                    message="FriTap stopped",
+                    message="friTap stopped",
                     data={"output_files": output_files},
                 )
 
             return CommandResult(
                 success=False,
-                message="FriTap is not running",
-                error="No active FriTap session found",
+                message="friTap is not running",
+                error="No active friTap session found",
             )
 
         except Exception as e:
-            logger.exception("Error stopping FriTap")
+            logger.exception("Error stopping friTap")
             return CommandResult(
                 success=False,
-                message=f"Error stopping FriTap: {e}",
+                message=f"Error stopping friTap: {e}",
                 error=str(e),
             )
 
     async def is_running(self) -> bool:
-        """Check if FriTap is currently running.
+        """Check if friTap is currently running.
 
         Returns:
-            True if FriTap is active, False otherwise.
+            True if friTap is active, False otherwise.
         """
         try:
             from sandroid.services import (
@@ -315,7 +315,7 @@ class HeadlessFriTapController:
             return False
 
     async def _try_start_fritap(self, package: str) -> tuple[bool, dict[str, Any]]:
-        """Attempt to start FriTap and return status info.
+        """Attempt to start friTap and return status info.
 
         Args:
             package: Target package name for FriTap.
@@ -338,7 +338,7 @@ class HeadlessFriTapController:
                 "error": result.error or result.message,
             }
         except Exception as e:
-            logger.warning(f"FriTap start failed: {e}")
+            logger.warning(f"friTap start failed: {e}")
             return False, {
                 "enabled": False,
                 "package": package,
@@ -347,17 +347,17 @@ class HeadlessFriTapController:
             }
 
     async def _stop_fritap_if_started(self, started: bool) -> None:
-        """Stop FriTap session if it was started, suppressing errors.
+        """Stop friTap session if it was started, suppressing errors.
 
         Args:
-            started: Whether a FriTap session was started.
+            started: Whether a friTap session was started.
         """
         if not started:
             return
         try:
             await self.stop()
         except Exception as e:
-            logger.warning(f"FriTap stop error: {e}")
+            logger.warning(f"friTap stop error: {e}")
 
     async def run_network_capture(
         self,
@@ -366,18 +366,18 @@ class HeadlessFriTapController:
         fritap_package: str | None = None,
         device_name: str = "unknown",
     ) -> dict[str, Any]:
-        """Run network capture with optional FriTap integration.
+        """Run network capture with optional friTap integration.
 
         Captures network traffic for the specified duration, analyzes the
         resulting PCAP file, and returns structured results including DNS
         queries, TCP connections, and byte-level IP analysis.
 
-        Optionally combines the capture with FriTap SSL/TLS key extraction
+        Optionally combines the capture with friTap SSL/TLS key extraction
         for a specified package, enabling decryption of captured traffic.
 
         Args:
             duration: Capture duration in seconds (minimum 5, default 60).
-            with_fritap: Whether to enable FriTap SSL keylog during capture.
+            with_fritap: Whether to enable friTap SSL keylog during capture.
             fritap_package: Target package name for FriTap. Required when
                 with_fritap is True.
             device_name: Name of the connected device for result metadata.
@@ -403,7 +403,7 @@ class HeadlessFriTapController:
             "device_name": device_name,
         }
 
-        # Start FriTap if requested
+        # Start friTap if requested
         fritap_started = False
         if with_fritap and fritap_package:
             fritap_started, fritap_info = await self._try_start_fritap(fritap_package)

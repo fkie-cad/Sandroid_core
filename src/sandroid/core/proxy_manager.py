@@ -695,6 +695,23 @@ def restart_can_help(rc: int, status: ZygoteStatus) -> bool:
     return rc in (0, 8) and status.init_has_ca and status.verdict != "injected"
 
 
+def _sweep_words(out: str) -> str:
+    """The CA inject script's ``sweep: bound=N already=M failed=K`` line in
+    words (E2E N3-V11): ``"36 running processes updated"``, plus the ones
+    that already had it or failed; ``""`` without a sweep line.
+    """
+    found = re.findall(r"sweep: bound=(\d+) already=(\d+) failed=(\d+)", out)
+    if not found:
+        return ""
+    bound, already, failed = (int(x) for x in found[0])
+    parts = [f"{bound} running process{'es' if bound != 1 else ''} updated"]
+    if already:
+        parts.append(f"{already} had it already")
+    if failed:
+        parts.append(f"{failed} failed")
+    return ", ".join(parts)
+
+
 def remember_ca_intent(serial: str | None, spec: CaSpec | None) -> None:
     """Record (or with None forget) the CA the user injected on *serial*."""
     if not serial:
@@ -1709,8 +1726,7 @@ class CAManager:
                     "inject", [_CA_STAGE_PATH, spec.name, apex], serial
                 )
                 status = self._status_for_spec(spec, serial, apex=apex)
-                sweep = re.findall(r"sweep: bound=\d+ already=\d+ failed=\d+", out)
-                detail = sweep[0] if sweep else f"API {api_level}, system dir"
+                detail = _sweep_words(out) or f"API {api_level}, system dir"
                 if status.injected:
                     remember_ca_intent(serial, spec)
                     msg = f"CA trusted system-wide without a Zygote restart ({detail})"
@@ -1806,8 +1822,7 @@ class CAManager:
             if removed == 0 and not deleted:
                 return True, "No CA of Sandroid's was installed"
             return True, (
-                f"CA removed from the system trust store ({removed} mounts). "
-                f"{CA_RUNNING_APPS_NOTE}"
+                f"CA removed from the system trust store. {CA_RUNNING_APPS_NOTE}"
             )
         if rc == -1:
             return False, (

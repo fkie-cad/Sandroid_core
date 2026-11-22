@@ -418,7 +418,6 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
             "app",
             "who",
             "req",
-            "tls",
             "status",
             "size",
         ]
@@ -568,7 +567,7 @@ async def test_mitm_lines_go_to_the_activity_log(flow_dir):
         )
         await settle(pilot)
         assert any(
-            "mitm:" in line and "CANNOT reach" in line for line in log._plain_lines
+            "Mitmproxy:" in line and "CANNOT reach" in line for line in log._plain_lines
         )
         assert "CANNOT reach" in panel.mitm.recent_lines[-1]
         # N6-V8: the SSL unpin bypass logs as bypass, not "mitm: Bypass …".
@@ -690,8 +689,10 @@ def test_mitm_port_shown_is_the_configured_one(monkeypatch):
     monkeypatch.setattr(service, "is_running", lambda: True)
     monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
     caption = panel.status_caption()
-    assert ":8090" in caption
-    assert "8080" not in caption
+    assert "8080" not in caption  # the title names problems, not the port
+    running = dict(panel.status_rows())["Mitmproxy"]
+    assert ":8090" in running
+    assert "8080" not in running
 
     monkeypatch.setattr(
         ProxyManager, "get_host_ip", classmethod(lambda cls: "10.0.2.2")
@@ -719,10 +720,11 @@ def test_capture_status_is_dots_and_words(monkeypatch):
         return Text.from_markup(markup).plain
 
     monkeypatch.setattr(service, "is_running", lambda: False)
-    assert plain(panel.status_caption()) == "Mitmproxy ○ off"
+    # A clean stop: nothing in the lens title (the status bar says off).
+    assert panel.status_caption() == ""
     rows = dict(panel.status_rows())
-    assert plain(rows["Mitmproxy web interface"]).startswith("○ stopped")
-    assert rows["Mitmproxy web interface"].startswith(f"[{pal.dim}]○ stopped[/]")
+    assert plain(rows["Mitmproxy"]).startswith("○ stopped")
+    assert rows["Mitmproxy"].startswith(f"[{pal.dim}]○ stopped[/]")
     assert plain(rows["CA"]) == "○ not installed  Ctrl+N"
     # "CA not installed" is a warning (not muted), like the Proxy dialog's.
     assert rows["CA"].startswith(f"[{pal.warn}]○ not installed[/]")
@@ -732,9 +734,8 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     monkeypatch.setattr(service, "is_running", lambda: True)
     panel._ca_ok = panel._ct_ok = True
     panel._proxy_state, panel._proxy_addr = "ours", "10.0.2.2:8080"
-    caption = panel.status_caption()
-    assert f"[{pal.ok}]Mitmproxy ● running[/]" in caption
-    assert f"CA [{pal.ok}]● installed[/]" in caption
+    # All well: the title names no problem (N3-V2).
+    assert panel.status_caption() == ""
     rows = dict(panel.status_rows())
     assert rows["CA"].startswith(f"[{pal.ok}]● installed[/]")
     assert plain(rows["Chrome CT"]) == "● bypassed"
@@ -764,7 +765,7 @@ def test_capture_status_is_dots_and_words(monkeypatch):
     assert not set("✓✗→▲^") & set(text), text
     panel._ca_ok = False
     caption = panel.status_caption()
-    assert f"CA [{pal.warn}]○ not installed[/]" in caption
+    assert caption == f"[{pal.warn}]CA ○ not installed[/]"
     assert "CA ○ not installed" in plain(caption)
     assert not set("✓✗▸◐⚑⇧␣⏎") & set(plain(caption)), caption
 
@@ -795,14 +796,16 @@ def test_caption_routing_follows_the_network_method(monkeypatch):
     monkeypatch.setattr(nm, "peek_network_method_service", lambda: fake)
     panel._proxy_state = "ours"  # set by an earlier Ctrl+D
     panel._handle_proxy_change("network_method", None, None)
-    assert "device routed" not in panel.status_caption()
     assert panel._proxy_state == "none"
     snap["value"] = nm.MethodSnapshot(device_proxy="ours", device_addr="127.0.0.1:8090")
     panel._handle_proxy_change("network_method", None, None)
-    assert "device routed" in panel.status_caption()
+    assert panel._proxy_state == "ours"
+    assert "Device proxy" in dict(panel.status_rows())["routing"]
     snap["value"] = nm.MethodSnapshot(device_proxy="external", device_addr="1.2.3.4:8")
     panel._handle_proxy_change("network_method", None, None)
-    assert "device on another proxy" in panel.status_caption()
+    assert panel._proxy_state == "other"
+    # Routing is no problem: the lens title stays out of it (N3-V2).
+    assert "device" not in panel.status_caption()
 
 
 def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
@@ -823,7 +826,7 @@ def test_caption_shows_a_stopped_mitmproxy_as_a_red_problem(monkeypatch):
     )
     panel._proxy_state = "none"
     service._state.last_error = None
-    assert panel.status_caption() == f"[{pal.dim}]Mitmproxy ○ off[/]"
+    assert panel.status_caption() == ""  # a clean stop: the status bar says it
 
 
 def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
@@ -832,9 +835,10 @@ def test_caption_says_starting_until_mitmweb_listens(monkeypatch):
     pal = lens_palette()
     panel, service = _caption_panel(monkeypatch, running=True)
     service._state.running, service._state.listening = True, False
-    assert f"[{pal.warn}]Mitmproxy ◌ starting[/]" in panel.status_caption()
+    assert panel.status_caption() == f"[{pal.warn}]Mitmproxy ◌ starting[/]"
     service._state.listening = True
-    assert f"[{pal.ok}]Mitmproxy ● running[/]" in panel.status_caption()
+    panel._ca_ok = True
+    assert panel.status_caption() == ""  # running, nothing to flag
 
 
 def test_fritap_stopped_is_muted_like_mitmproxy(monkeypatch):
@@ -1041,23 +1045,25 @@ def _layout_at(monkeypatch, width: int, identity: bool) -> list[tuple[str, str, 
 @pytest.mark.parametrize(
     ("width", "identity", "keys"),
     [
-        (160, False, ["time", "app", "who", "req", "tls", "status", "size"]),
+        (160, False, ["time", "app", "who", "req", "status", "size"]),
         (
             160,
             True,
-            ["time", "app", "who", "req", "tls", "ident", "status", "size"],
+            ["time", "app", "who", "req", "ident", "status", "size"],
         ),
-        (120, True, ["time", "app", "who", "req", "tls", "ident", "status"]),
-        (100, False, ["time", "app", "who", "req", "tls", "status"]),
+        (120, True, ["time", "app", "who", "req", "ident", "status"]),
+        (100, False, ["time", "app", "who", "req", "status"]),
         # Inspector open (~100 columns) with Identity: TLS and Time go
-        (100, True, ["app", "who", "req", "ident", "status"]),
-        (80, False, ["app", "who", "req", "status"]),
-        (60, False, ["who", "req", "status"]),
+        (100, True, ["time", "app", "req", "ident", "status"]),
+        (80, False, ["time", "app", "req", "status"]),
+        # The Inspector open at 120 columns: App and Status stay (N3-V3).
+        (60, False, ["app", "req", "status"]),
     ],
 )
 def test_column_order_and_narrow_drop_order(monkeypatch, width, identity, keys):
     """Time | App | Recipient | Request | TLS | Identity | Status | Size; a
-    narrow lens drops Size, TLS, Time, App (in that order) for Request.
+    narrow lens drops Size, Recipient, Time (in that order) for Request;
+    App and Status stay, and there is no TLS column (N3-V3).
     """
     layout = _layout_at(monkeypatch, width, identity)
     assert [k for k, _l, _w in layout] == keys
@@ -1068,7 +1074,7 @@ def test_column_order_and_narrow_drop_order(monkeypatch, width, identity, keys):
         assert widths["ident"] == (18 if width >= 130 else 14)
     labels = {k: label for k, label, _w in layout}
     assert labels.get("app", "App") == "App"
-    assert labels.get("tls", "TLS") == "TLS"
+    assert "tls" not in labels  # Status says it (N3-V3)
 
 
 def test_highlight_column_may_take_the_size_place(monkeypatch):
@@ -1080,8 +1086,12 @@ def test_highlight_column_may_take_the_size_place(monkeypatch):
     monkeypatch.setattr(HighlightView, "show_column", lambda self, width: True)
     keys = [k for k, _l, _w in _layout_at(monkeypatch, 200, False)]
     assert keys[-2:] == ["size", "hl"]
+    # Without the TLS column 158 fits Size and Highlight; at 140 Highlight
+    # takes Size's place.
     keys = [k for k, _l, _w in _layout_at(monkeypatch, 158, True)]
-    assert keys == ["time", "app", "who", "req", "tls", "ident", "status", "hl"]
+    assert keys == ["time", "app", "who", "req", "ident", "status", "size", "hl"]
+    keys = [k for k, _l, _w in _layout_at(monkeypatch, 140, True)]
+    assert keys == ["time", "app", "who", "req", "ident", "status", "hl"]
     assert "hl" not in [k for k, _l, _w in _layout_at(monkeypatch, 100, True)]
 
 
@@ -1092,7 +1102,6 @@ def _cell_texts(row: FlowRow) -> dict[str, str]:
         ("app", "App", 20),
         ("who", "Recipient", 18),
         ("req", "Request", 40),
-        ("tls", "TLS", 10),
         ("status", "Status", 13),
         ("size", "Size", 16),
     ]
@@ -1100,7 +1109,10 @@ def _cell_texts(row: FlowRow) -> dict[str, str]:
     return {k: cells[i].plain for i, (k, _l, _w) in enumerate(layout)}
 
 
-def test_app_and_tls_cells_say_it_in_words():
+def test_app_and_status_cells_say_it_in_words():
+    """No TLS column (N3-V3): Status says "TLS failed" once and marks a flow
+    sent without TLS "plain"; Recipient only names a known organisation.
+    """
     from sandroid.tui.themes import lens_palette
 
     # an App Proxy flow carries its app tag; over https it is TLS
@@ -1115,8 +1127,11 @@ def test_app_and_tls_cells_say_it_in_words():
     )
     cells = _cell_texts(proxied)
     assert cells["app"] == PKG
-    assert cells["tls"] == "TLS"
+    assert cells["status"] == "200"
+    assert cells["who"] == ""  # a bare domain would repeat the Request host
     assert cells["size"] == "sent 2.0 KB"
+    meta = FlowRow(key="m", ts=0.0, host="graph.facebook.com", status=200)
+    assert _cell_texts(meta)["who"] == "Meta"
     # an untagged flow shows no app (nothing, not a placeholder)
     untagged = FlowRow(
         key="f2",
@@ -1128,22 +1143,29 @@ def test_app_and_tls_cells_say_it_in_words():
     )
     cells = _cell_texts(untagged)
     assert cells["app"] == ""
-    assert cells["tls"] == "plain"
+    assert cells["status"] == "200 plain"
     assert cells["size"] == "received 5.0 KB"
     panel = NetworkPanel()
-    layout = [("req", "Request", 40), ("who", "Recipient", 18), ("tls", "TLS", 10)]
-    assert panel._cells(untagged, layout)[2].style == lens_palette().warn
+    layout = [("req", "Request", 40), ("who", "Recipient", 18), ("status", "S", 13)]
+    status = panel._cells(untagged, layout)[2]
+    assert any(
+        status.plain[span.start : span.end] == " plain"
+        and span.style == lens_palette().warn
+        for span in status.spans
+    )
     # a failed handshake
     tls = FlowRow(key="t1", ts=0.0, host="c.io", kind="tls", method="TLS", app=PKG)
     cells = _cell_texts(tls)
-    assert cells["tls"] == "TLS failed"
-    assert cells["status"] == "TLS failed"
+    assert cells["status"] == "TLS failed"  # once, not in a TLS column too
     assert cells["app"] == PKG
     # no protocol recorded (older log): no guess
-    assert _cell_texts(FlowRow(key="f3", ts=0.0, host="d.io"))["tls"] == ""
+    old = FlowRow(key="f3", ts=0.0, host="d.io", status=200)
+    assert _cell_texts(old)["status"] == "200"
     # websockets
-    assert _cell_texts(FlowRow(key="f4", ts=0.0, protocol="WSS"))["tls"] == "TLS"
-    assert _cell_texts(FlowRow(key="f5", ts=0.0, protocol="WS"))["tls"] == "plain"
+    wss = FlowRow(key="f4", ts=0.0, protocol="WSS", status=101)
+    assert _cell_texts(wss)["status"] == "101"
+    ws = FlowRow(key="f5", ts=0.0, protocol="WS", status=101)
+    assert _cell_texts(ws)["status"] == "101 plain"
     # a long package keeps its trailing name parts, cut without a glyph
     long_app = FlowRow(key="f6", ts=0.0, app="com.ebay.kleinanzeigen")
     assert _cell_texts(long_app)["app"] == "ebay.kleinanzeigen"
@@ -1165,7 +1187,7 @@ def test_status_and_size_cells_have_no_glyphs():
     ]
     for row in rows:
         cells = _cell_texts(row)
-        for key in ("app", "tls", "status", "size"):
+        for key in ("app", "status", "size"):
             assert not set(cells[key]) & set("\u2191\u2193\u2013\u2026\u2691"), (
                 key,
                 cells[key],
@@ -1205,6 +1227,22 @@ def test_size_column_fits_three_digit_kilobytes():
     request = panel._cells(tls, layout)[2].plain
     assert request.startswith("setup TLS ssl.gstatic.com")
     assert len(request) <= 40
+
+
+def test_request_cell_never_shows_a_doubled_ellipsis():
+    """N3-V3: at 120 columns "GET thumb.wikimedia.org/……" (an ellipsis cut
+    by another). The host is cut instead, with one ellipsis.
+    """
+    for width in range(12, 50):
+        text = np_mod.smart_request(
+            "GET", "thumb.wikimedia.org", "/wikipedia/commons/a/b/c.jpg", width
+        ).plain
+        assert "……" not in text, (width, text)
+        assert len(text) <= width, (width, text)
+    assert (
+        np_mod.smart_request("GET", "thumb.wikimedia.org", "/a/b/c.jpg", 26).plain
+        == "GET thumb.wikimedia.org/…"
+    )
 
 
 def test_decoded_body_note_and_protocol_label():
@@ -1412,7 +1450,8 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     assert svc.reconcile_liveness() == []  # alive: nothing changes
     from rich.text import Text
 
-    assert "unpin ● on" in Text.from_markup(mitm.status_caption()).plain
+    # The SSL unpin state is on the Network status page, not in the title.
+    assert "● on" in Text.from_markup(dict(mitm.status_rows())["SSL unpin"]).plain
 
     # The Zygote restart: the session detaches, the app comes back as 8593.
     jm.has_active_session = lambda: False
@@ -1659,13 +1698,13 @@ async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
         assert panel.following
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
         table.focus()
         await pilot.press("up")
         await settle(pilot)
         assert not panel.following
         title = ms._lens_captions["network"][0]
-        assert title.startswith("scrolled back · End = live · ")
+        assert title.startswith("scrolled back · End = live")
         row = table.cursor_row
         count = table.row_count
         write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
@@ -1674,12 +1713,12 @@ async def test_follow_live_stops_on_up_or_a_click_and_end_resumes(flow_dir):
         await settle(pilot)
         assert table.cursor_row == row
         title = ms._lens_captions["network"][0]
-        assert title.startswith("scrolled back · 2 new below · End = live · ")
+        assert title.startswith("scrolled back · 2 new below · End = live")
         await pilot.press("end")
         await settle(pilot)
         assert panel.following
         assert table.cursor_row == table.row_count - 1
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
         # A click on a row above the newest one stops following.
         await pilot.click("#net-flows", offset=(4, 2))
         await settle(pilot)
@@ -1701,7 +1740,7 @@ async def test_a_rebuild_that_loses_the_kept_flow_is_live_again(flow_dir):
         await settle(pilot)
         assert panel.table.cursor_row == panel.table.row_count - 1
         assert panel.following
-        assert ms._lens_captions["network"][0].startswith("live · ")
+        assert ms._lens_captions["network"][0].split(" · ")[0] == "live"
 
 
 async def test_new_below_counts_rows_through_a_width_rebuild(flow_dir):
@@ -1779,12 +1818,11 @@ async def test_flows_with_profile_values_are_tinted_named_and_filtered(
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
-        assert [str(c.value) for c in table.columns][:7] == [
+        assert [str(c.value) for c in table.columns][:6] == [
             "time",
             "app",
             "who",
             "req",
-            "tls",
             "ident",
             "status",
         ]
@@ -1901,7 +1939,7 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         assert "ident" not in [str(c.value) for c in panel.table.columns]
-        assert len(panel.table.columns) == 7
+        assert len(panel.table.columns) == 6
         assert _tinted(panel.table) == set()
 
 
@@ -2175,9 +2213,9 @@ async def test_reveal_lands_on_a_flow_the_hidden_lens_has_not_loaded(flow_dir):
 
 
 async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkeypatch):
-    """E2E: after Remove CA the caption still said "CA installed", after the
-    App Proxy was removed still "app proxies 1" -- until a lens switch.
-    Both are now repainted from STATE_CHANGED (published off the UI thread).
+    """E2E: after Remove CA the caption missed it until a lens switch. The
+    title now shows only problems (N3-V2): "CA ○ not installed" comes and
+    goes with STATE_CHANGED (published off the UI thread).
     """
     import threading
 
@@ -2213,8 +2251,8 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
         def title() -> str:
             return Text.from_markup(ms._lens_captions["network"][0] or "").plain
 
-        assert "app proxies 1" in title()
-        assert "CA ● installed" in title()
+        # All well: the title names no problem (N3-V2).
+        assert "CA" not in title()
 
         def publish(fn, *args) -> None:
             worker = threading.Thread(target=fn, args=args)
@@ -2231,12 +2269,11 @@ async def test_caption_follows_ca_removal_and_app_proxy_changes(flow_dir, monkey
 
         routes.clear()
         publish(pm.FocusManager._publish_health, None)
-        await until(pilot, lambda: "app proxies" not in title())
+        await settle(pilot)
 
         device["ca"] = True
         publish(pm.publish_ca_change, None, True)
-        await until(pilot, lambda: "CA ● installed" in title())
-        assert "CA ○ not installed" not in title()
+        await until(pilot, lambda: "CA" not in title())
 
 
 async def test_ca_change_of_another_device_leaves_the_caption(flow_dir, monkeypatch):
@@ -2725,3 +2762,103 @@ def test_activity_log_task_errors_are_red():
         "[#ff0000]"
     )
     assert ActivityLog._level_colored("plain line", colors) == "plain line"
+
+
+def test_network_lines_say_it_in_words_not_glyphs(monkeypatch):
+    """N3-V4: "[OK]" / "[~]" markers, "<<< Stopped:", ">>> Started:", the 🔑
+    of friTap key lines and the "X" of "X Command Failed" became words.
+    """
+    import re
+
+    from sandroid.analysis.fritap_formatter import FriTapMessageFormatter
+    from sandroid.tui.modals.message_modal import ErrorModal
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    glyphs = re.compile(r"\[OK\]|\[~\]|<<<|>>>|🔑|→|✓")
+    mitm = MitmproxyPanel()
+    for line in (
+        "[INFO] [OK] device proxy set to 10.0.2.2:8090",
+        "[INFO] [~] waiting for the device to settle…",
+    ):
+        mitm._log(line)
+    assert list(mitm.recent_lines) == [
+        "device proxy set to 10.0.2.2:8090",
+        "waiting for the device to settle…",
+    ]
+    key = FriTapMessageFormatter._format_keylog(
+        {"keylog": "CLIENT_RANDOM abc 0123456789abcdef0123"}
+    )
+    assert key.startswith("TLS key CLIENT_RANDOM")
+    fritap = FriTapPanel()
+    monkeypatch.setattr(fritap, "refresh_header", lambda: None)
+    fritap._append_line(key)
+    fritap._append_line("🔑 CLIENT_RANDOM: 5f1e")  # an older engine
+    assert fritap._keys == 2
+    for text in [*mitm.recent_lines, *fritap.recent_lines]:
+        assert not glyphs.search(text), text
+    assert "X" not in ErrorModal("Command Failed", "boom").title_text.split()
+
+
+async def test_inspector_footer_and_ticker_keys_are_words(flow_dir):
+    """N3-V4: "Left/Right: tab   [ ] tabs   esc close" and "^Y AI"."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        await pilot.press("enter")
+        await settle(pilot)
+        footer = ms.query_one("#inspector").border_subtitle
+        assert footer == "Left/Right tab · [ ] tabs · Esc close"
+        hint = str(ms.query_one("#log-ticker-hint").render())
+        assert hint.startswith("Ctrl+Y AI")
+
+
+def test_tool_names_are_spelled_one_way():
+    """N3-V11: friTap / FriTap / "FriTap Configuration", Mitmproxy / mitm."""
+    import inspect
+
+    from sandroid.analysis import fritap_config
+    from sandroid.commands import network_commands
+    from sandroid.tui.app import SandroidTUI
+
+    h = next(b for b in SandroidTUI.BINDINGS if getattr(b, "id", None) == "fritap")
+    assert h.description == "friTap"
+    m = next(b for b in NetworkPanel.BINDINGS if b.key == "M")
+    assert m.description == "Start/stop Mitmproxy"
+    for module in (fritap_config, network_commands):
+        source = inspect.getsource(module)
+        for literal in ('"FriTap ', "'FriTap ", 'f"FriTap ', '"FriTap"'):
+            assert literal not in source, (module.__name__, literal)
+
+
+def test_fritap_recent_lists_a_line_once(monkeypatch):
+    """N3: friTap's Recent listed "[*] x" and "x" (its print and its log
+    record) and four identical hook notes; errors were counted twice.
+    """
+    from sandroid.tui.widgets.fritap_panel import FriTapPanel
+
+    panel = FriTapPanel()
+    monkeypatch.setattr(panel, "refresh_header", lambda: None)
+    for line in (
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "[*] libssl.so: keylog hooks installed via callback",
+        "libssl.so: keylog hooks installed via callback",
+        "[error]ERROR: unable to intercept function at 0x6c[/error]",
+        "ERROR: unable to intercept function at 0x6c",
+    ):
+        panel._append_line(line)
+    assert list(panel.recent_lines) == [
+        "libnss3.so found & will be hooked on Android (tls)!",
+        "libssl.so: keylog hooks installed via callback",
+        "✗ ERROR: unable to intercept function at 0x6c",
+    ]
+    assert panel._errors == 1
+
+
+def test_activity_log_shows_tool_lines_without_markers():
+    from sandroid.tui.widgets.activity_log import ActivityLog
+
+    log = ActivityLog()
+    log.log_message("[*] Android dynamic loader hooked.", "friTap")
+    assert log._plain_lines[-1].endswith("friTap: Android dynamic loader hooked.")

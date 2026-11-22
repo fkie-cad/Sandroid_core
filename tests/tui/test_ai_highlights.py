@@ -441,7 +441,7 @@ async def test_network_identity_and_highlight_columns_together(
         await until(pilot, lambda: "hl" in _cols(table))
         cols = _cols(table)
         # Time | App | Recipient | Request | TLS | Identity | Status | Size
-        order = ["time", "app", "who", "req", "tls", "ident", "status", "size"]
+        order = ["time", "app", "who", "req", "ident", "status", "size"]
         assert [c for c in cols if c != "hl"] == [c for c in order if c in cols]
         assert "ident" in cols
         assert cols[-1] == "hl"

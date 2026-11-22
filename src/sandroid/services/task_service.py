@@ -1,6 +1,6 @@
 """Background Task Service for Sandroid.
 
-This service manages the lifecycle of background tasks such as FriTap,
+This service manages the lifecycle of background tasks such as friTap,
 Dexray-Intercept, network capture, and other long-running operations.
 
 Extracted from Toolbox class to follow Single Responsibility Principle.
@@ -19,7 +19,7 @@ Usage:
     # Register a task
     task_service.register(
         name="fritap",
-        display_name="FriTap",
+        display_name="friTap",
         instance=fritap_instance,
         stop_callback=fritap_instance.stop,
         app_name="com.example.app"
@@ -48,7 +48,7 @@ class BackgroundTask:
 
     Attributes:
         name: Internal identifier (e.g., "fritap", "dexray-intercept")
-        display_name: Human-readable name (e.g., "FriTap", "Dexray-Intercept")
+        display_name: Human-readable name (e.g., "friTap", "Dexray-Intercept")
         instance: The actual tool/process instance
         stop_callback: Function to call when stopping the task
         started_at: Timestamp when the task was started
@@ -431,7 +431,7 @@ class TaskService:
             Dictionary mapping task names to status info:
             {
                 "fritap": {
-                    "display_name": "FriTap",
+                    "display_name": "friTap",
                     "started_at": datetime,
                     "app_name": "com.example.app",
                     "target_pid": 12345,
@@ -457,7 +457,7 @@ class TaskService:
         """Get a formatted string showing running tasks for menu display.
 
         Returns:
-            Formatted string like "● FriTap (12345) | ● Network"
+            Formatted string like "● friTap (12345) | ● Network"
             or empty string if no tasks running
         """
         with self._lock:

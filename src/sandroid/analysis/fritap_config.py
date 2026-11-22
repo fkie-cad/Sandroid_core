@@ -1,6 +1,6 @@
-"""FriTap interactive configuration UI for TUI and CLI modes.
+"""friTap interactive configuration UI for TUI and CLI modes.
 
-Extracted from fritap.py to keep the FriTap class focused on core functionality.
+Extracted from fritap.py to keep the friTap class focused on core functionality.
 """
 
 import logging
@@ -33,7 +33,7 @@ _FRESH_LABEL = "Restart the app first (capture from launch)"
 
 
 def configure_fritap_tui() -> dict | None:
-    """Show FriTap toggle configuration modal in TUI mode.
+    """Show friTap toggle configuration modal in TUI mode.
 
     Returns:
         Configuration dict if user confirms, None if cancelled.
@@ -55,9 +55,9 @@ def configure_fritap_tui() -> dict | None:
         toggle_options["Enable Network Capture (tcpdump)"] = False
 
     result = request_toggle_config(
-        title="FriTap Configuration",
+        title="friTap Configuration",
         options=toggle_options,
-        message="Configure FriTap options"
+        message="Configure friTap options"
         + (" (network capture already running)" if network_already_running else ""),
         theme="frida",
     )
@@ -77,7 +77,7 @@ def configure_fritap_tui() -> dict | None:
 
 
 def configure_fritap_cli() -> dict | None:
-    """Show FriTap interactive configuration in CLI/Rich console mode.
+    """Show friTap interactive configuration in CLI/Rich console mode.
 
     Returns:
         Configuration dict if user confirms, None if cancelled.
@@ -136,9 +136,9 @@ def configure_fritap_cli() -> dict | None:
 def _render_config_box(
     console, _box_line, BOX_WIDTH, settings, network_already_running
 ):
-    """Render the FriTap configuration box to the console."""
+    """Render the friTap configuration box to the console."""
     console.print(f"[primary]╔{'═' * BOX_WIDTH}╗[/primary]")
-    console.print(_box_line("[bold]FriTap Configuration[/bold]"))
+    console.print(_box_line("[bold]friTap Configuration[/bold]"))
     console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
 
     # Verbose mode option
@@ -230,7 +230,7 @@ def _render_config_box(
     console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
     console.print(
         _box_line(
-            "[success]\\[Enter][/success] Start FriTap    [warning]\\[Esc/Q][/warning] Cancel",
+            "[success]\\[Enter][/success] Start friTap    [warning]\\[Esc/Q][/warning] Cancel",
             align="left",
         )
     )

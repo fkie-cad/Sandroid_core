@@ -1290,7 +1290,7 @@ class MainScreen(Screen):
             height = max(1, col.size.height if col is not None else 1)
             return f"{round(100 * self._chat_drag_rows / height)}% · release to snap"
         if self._chat_mode == "max":
-            return key_words("max · ⇧↓ restore · ^Y close")
+            return key_words("max · ⇧↓ restore · Ctrl+Y close")
         if self._chat_too_short():
             return key_words("small window · ^Y close")
         return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · ^Y close")

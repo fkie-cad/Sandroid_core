@@ -663,7 +663,7 @@ class QuitController:
 
         run_bounded("device clock shells", _close_clock_shells, 2.0)
 
-        # Stop all background tasks (FriTap, network capture, etc.). A friTap
+        # Stop all background tasks (friTap, network capture, etc.). A friTap
         # agent that cannot unload must not hold the quit up.
         logger.info("Stopping all background tasks before exit")
         run_bounded("background tasks", lambda: get_task_service().stop_all(), 8.0)

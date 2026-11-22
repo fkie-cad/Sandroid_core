@@ -145,7 +145,8 @@ class ErrorModal(DangerModal):
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
         with Vertical(classes="modal-container"):
-            yield Label(f"[red]X[/] {self.title_text}", classes="modal-title")
+            # The red danger styling says "error"; no "X" glyph (N3-V4).
+            yield Label(self.title_text, classes="modal-title")
             yield Static(self.message_text, classes="modal-content")
             with Vertical(classes="button-row"):
                 yield Button("OK", id="ok", classes="-primary")

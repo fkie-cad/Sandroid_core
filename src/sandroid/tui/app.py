@@ -248,7 +248,7 @@ class SandroidTUI(App):
         ),
         # Network
         Binding("y", "proxy", "Proxy", show=False, id="proxy"),
-        Binding("h", "action_key('h')", "FriTap", show=False, id="fritap"),
+        Binding("h", "action_key('h')", "friTap", show=False, id="fritap"),
         Binding(
             "w", "network_capture", "Network Capture", show=False, id="network_capture"
         ),

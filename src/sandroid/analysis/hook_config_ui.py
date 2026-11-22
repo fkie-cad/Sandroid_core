@@ -64,7 +64,7 @@ _SETTING_DEFINITIONS: list[_SettingDef] = [
     ),
     _SettingDef(
         key="enable_fritap",
-        label="FriTap:           ",
+        label="friTap:           ",
         hotkey="f",
         enabled_text="Enabled",
         disabled_text="Disabled",
@@ -357,7 +357,7 @@ class AppProfilerConfigUI:
     """Interactive UI for AppProfiler configuration.
 
     Supports TUI mode (UIRequestBus) and Rich console mode for configuring
-    stack traces, unlink deactivation, FriTap, and custom scripts.
+    stack traces, unlink deactivation, friTap, and custom scripts.
     """
 
     # Setting descriptions for display (kept for external consumers)
@@ -405,7 +405,7 @@ class AppProfilerConfigUI:
             "Deactivate Unlink (keep files from being deleted)": self._settings[
                 "deactivate_unlink"
             ],
-            "Enable FriTap (TLS key extraction and traffic capture)": self._settings[
+            "Enable friTap (TLS key extraction and traffic capture)": self._settings[
                 "enable_fritap"
             ],
             _FRESH_LABEL: self._settings["fresh"],
@@ -413,7 +413,7 @@ class AppProfilerConfigUI:
         result = request_toggle_config(
             title="AppProfiler Configuration",
             options=toggle_options,
-            message="Configure dexray-intercept options.\nAdvanced options (custom scripts, FriTap dir) use defaults.",
+            message="Configure dexray-intercept options.\nAdvanced options (custom scripts, friTap dir) use defaults.",
             theme="frida",
         )
         if result is None:
@@ -426,7 +426,7 @@ class AppProfilerConfigUI:
                 "Deactivate Unlink (keep files from being deleted)", False
             ),
             "enable_fritap": result.get(
-                "Enable FriTap (TLS key extraction and traffic capture)", False
+                "Enable friTap (TLS key extraction and traffic capture)", False
             ),
             "fritap_output_dir": self._settings["fritap_output_dir"],
             "custom_scripts": self._settings["custom_scripts"],
@@ -465,7 +465,7 @@ class AppProfilerConfigUI:
                     settings[setting_key] = not settings[setting_key]
             elif choice == "d":
                 console.print(
-                    "\n[primary]Enter FriTap output directory (relative to dexray_intercept/):[/primary]"
+                    "\n[primary]Enter friTap output directory (relative to dexray_intercept/):[/primary]"
                 )
                 console.print(f"[dim]Current: {settings['fritap_output_dir']}[/dim]")
                 console.print(
@@ -520,7 +520,7 @@ class AppProfilerConfigUI:
         if settings["deactivate_unlink"]:
             enabled_features.append("Deactivate Unlink")
         if settings["enable_fritap"]:
-            enabled_features.append(f"FriTap (output: {settings['fritap_output_dir']})")
+            enabled_features.append(f"friTap (output: {settings['fritap_output_dir']})")
         if settings["custom_scripts"]:
             enabled_features.append(
                 f"{len(settings['custom_scripts'])} Custom Script(s)"
@@ -551,7 +551,7 @@ class AppProfilerConfigUI:
                     + "[warning]\u2551[/warning]"
                 )
                 console.print(
-                    "[warning]\u2551[/warning] [dim]FriTap extracts TLS keys for decrypting HTTPS traffic.[/dim]"
+                    "[warning]\u2551[/warning] [dim]friTap extracts TLS keys for decrypting HTTPS traffic.[/dim]"
                     + " " * 16
                     + "[warning]\u2551[/warning]"
                 )
@@ -565,7 +565,7 @@ class AppProfilerConfigUI:
                     "[primary]Would you like to enable network capture?[/primary]"
                 )
                 console.print("[accent]  [y][/accent] Yes, enable network capture")
-                console.print("[dim]  [n][/dim] No, continue with FriTap only")
+                console.print("[dim]  [n][/dim] No, continue with friTap only")
 
                 if click.getchar().lower() == "y":
                     console.print(
@@ -576,7 +576,7 @@ class AppProfilerConfigUI:
                     )
                 else:
                     console.print(
-                        "\n[dim]FriTap will be enabled without network capture.[/dim]"
+                        "\n[dim]friTap will be enabled without network capture.[/dim]"
                     )
                 input("\nPress Enter to continue...")
         except ImportError:
@@ -639,14 +639,14 @@ class AppProfilerConfigUI:
         _box_divider(console)
         console.print(
             _box_line(
-                "\\[S] Toggle Stack Traces  \\[U] Toggle Unlink  \\[F] Toggle FriTap",
+                "\\[S] Toggle Stack Traces  \\[U] Toggle Unlink  \\[F] Toggle friTap",
                 _W,
                 align="left",
             )
         )
         console.print(
             _box_line(
-                "\\[D] Set FriTap Dir  \\[C] Add Custom Script  \\[R] Remove Script",
+                "\\[D] Set friTap Dir  \\[C] Add Custom Script  \\[R] Remove Script",
                 _W,
                 align="left",
             )

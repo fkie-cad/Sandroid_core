@@ -616,3 +616,16 @@ def test_rotation_says_running_apps_keep_the_old_trust(host_ca, device):
         pm.CA_RUNNING_APPS_NOTE
         not in pm.CAManager().inject_ca_into_zygote(host_ca).message
     )
+
+
+def test_sweep_line_reads_in_words():
+    """N3-V11: the CA inject message said "sweep: bound=40 already=0
+    failed=0"; the counts read as words now.
+    """
+    assert pm._sweep_words("x\nsweep: bound=40 already=0 failed=0\n") == (
+        "40 running processes updated"
+    )
+    assert pm._sweep_words("sweep: bound=1 already=3 failed=2") == (
+        "1 running process updated, 3 had it already, 2 failed"
+    )
+    assert pm._sweep_words("no sweep here") == ""

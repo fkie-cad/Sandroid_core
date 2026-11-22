@@ -130,7 +130,10 @@ STATUS_KEY = "network:capture-status"
 #: has this many cells; Time | App | Recipient | Request | TLS | Identity |
 #: Status | Size is the full order.
 REQUEST_MIN_WIDTH = 26
-LAYOUT_DROP_ORDER = ("size", "tls", "time", "app")
+#: Columns a narrow lens drops, first to last (N3-V3): Recipient only adds
+#: an organisation name, Time is on the Inspector's Summary; App and Status
+#: are never dropped.
+LAYOUT_DROP_ORDER = ("size", "who", "time")
 
 # --------------------------------------------------------------------------
 # recipients + OS noise
@@ -364,6 +367,8 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
         candidates.append(f"/{segs[0]}/…/{segs[-1]}")
     if len(segs) > 1:
         candidates.append(f"/…/{segs[-1]}")
+    if segs:
+        candidates.append("/…")
     room = width - len(method) - 1 - len(host)
     chosen = None
     for cand in candidates:
@@ -374,7 +379,8 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
     text.append(method, style=lens_palette().muted)
     text.append(" ")
     if chosen is None:
-        rest = _ellipsize(host + candidates[-1], max(1, width - len(method) - 1))
+        # Only the host, cut: never "host/……" (an ellipsis cut by another).
+        rest = _ellipsize(host, max(1, width - len(method) - 1))
         hlen = min(len(host), len(rest))
         text.append(rest[:hlen], style=lens_palette().text)
         text.append(rest[hlen:], style=lens_palette().muted)
@@ -1203,7 +1209,7 @@ class NetworkPanel(Widget):
         Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
         Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
         Binding("I", "status", "Network status", show=False),
-        Binding("M", "mitm('toggle_running')", "Start/stop mitm", show=False),
+        Binding("M", "mitm('toggle_running')", "Start/stop Mitmproxy", show=False),
         Binding("ctrl+n", "mitm('inject_ca')", "Install CA", show=False),
         Binding("ctrl+p", "mitm('toggle_ssl_unpin')", "SSL unpin", show=False),
         Binding("ctrl+r", "mitm('restart')", "Restart mitm", show=False),
@@ -1760,21 +1766,22 @@ class NetworkPanel(Widget):
     def _layout(self) -> list[tuple[str, str, int]]:
         """``[(key, label, width)]`` of the visible columns for this width.
 
-        Time | App | Recipient | Request | TLS | Identity | Status | Size when
+        Time | App | Recipient | Request | Identity | Status | Size when
         there is room; a narrow lens (e.g. 100 columns with the Inspector
-        open) drops Size, then TLS, then Time, then App (``LAYOUT_DROP_ORDER``)
+        open) drops Size, then Recipient, then Time (``LAYOUT_DROP_ORDER``)
         until Request has ``REQUEST_MIN_WIDTH`` cells, instead of scrolling
-        sideways. Identity keeps its own rule (``_privacy_columns``).
+        sideways; App and Status stay. Identity keeps its own rule
+        (``_privacy_columns``). There is no TLS column: Status says
+        ``TLS failed`` and marks a flow sent without TLS ``plain`` (N3-V3).
         """
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
-        app = 20 if avail >= 140 else 14
+        app = 20 if avail >= 140 else (14 if avail >= 70 else 12)
         cols = [
             ("time", "Time", 8),
             ("app", "App", app),
             ("who", "Recipient", who),
             ("req", "Request", 0),
-            ("tls", "TLS", 10),
         ]
         cols += self._privacy_columns(avail)
         cols += [("status", "Status", 13), ("size", "Size", 16)]
@@ -1801,25 +1808,19 @@ class NetworkPanel(Widget):
 
     def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
         widths = {k: w for k, _, w in layout}
-        req_w, who_w = widths["req"], widths["who"]
+        req_w, who_w = widths["req"], widths.get("who", 0)
         t = Text(
             time.strftime("%H:%M:%S", time.localtime(row.ts)), style=lens_palette().dim
         )
         label, known = row.recipient
-        who = Text(_ellipsize(label, who_w), style=lens_palette().text)
+        # Only an organisation name says more than the Request's host
+        # ("Meta" for graph.facebook.com); a bare domain repeats it (N3-V3).
+        who = Text(_ellipsize(label, who_w) if known else "", style=lens_palette().text)
         app = Text(
             app_label(row.app, widths.get("app", 0)),
             style=lens_palette().muted,
             no_wrap=True,
             overflow="crop",
-        )
-        tls = tls_word(row)
-        tls_cell = Text(
-            tls,
-            style={
-                "TLS failed": f"bold {lens_palette().bad}",
-                "plain": lens_palette().warn,
-            }.get(tls, lens_palette().muted),
         )
         tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
@@ -1852,6 +1853,11 @@ class NetworkPanel(Widget):
                 elif code >= 500:
                     color = lens_palette().bad
                 status = Text(str(code), style=color)
+            if tls_word(row) == "plain":
+                # Sent without TLS: worth seeing (Status, no own column).
+                status.append(
+                    " plain" if len(status) else "plain", style=lens_palette().warn
+                )
             size = Text(
                 size_words(row),
                 style=lens_palette().text if row.req_bytes else lens_palette().dim,
@@ -1862,7 +1868,6 @@ class NetworkPanel(Widget):
             "app": app,
             "who": who,
             "req": req,
-            "tls": tls_cell,
             "status": status,
             "size": size,
         }
@@ -2159,15 +2164,22 @@ class NetworkPanel(Widget):
             note = self._review_note_short()
             warn = lens_palette().warn
             return f"[{warn}]review {label}[/]" + (f" · {note}" if note else "")
+        # Mitmproxy: at most one problem (N3-V2); what runs, where the
+        # device points and the method are in the status bar and the method
+        # line below. friTap: its state (the status bar does not name it).
         mitm = self.mitm
-        title = mitm.status_caption() if mitm is not None else ""
         fritap = self.fritap
-        token = fritap.caption_token() if fritap is not None else ""
-        if token:
-            title += f" · {token}"
+        title = " · ".join(
+            part
+            for part in (
+                mitm.status_caption() if mitm is not None else "",
+                fritap.caption_token() if fritap is not None else "",
+            )
+            if part
+        )
         if self._live:
             # Follow state: in ONE place, the title (as in every lens).
-            title = f"{self._follow.text} · {title}"
+            title = f"{self._follow.text} · {title}" if title else self._follow.text
         return title
 
     def _review_note_short(self) -> str:
@@ -2611,7 +2623,7 @@ class NetworkPanel(Widget):
             title=f"{row.method} {label}",
             subtitle=rich_escape(_ellipsize(row.host + row.path, 300)),
             tabs=tabs,
-            footer="Left/Right: tab",
+            footer="Left/Right tab",
             key=key,
             lens=LENS_ID,
         )
@@ -2622,6 +2634,19 @@ class NetworkPanel(Widget):
         m_grid = _grid()
         for label, value in mitm.status_rows() if mitm is not None else []:
             m_grid.add_row(label, Text.from_markup(value))
+        # The method notes the lens line leaves out (pinning, SDK runtime).
+        try:
+            from sandroid.services.network_method import get_network_method_service
+
+            notes = [
+                n
+                for n in get_network_method_service().view_cached().status_notes
+                if n not in ("CA installed", "Mitmproxy running")  # rows above
+            ]
+        except Exception:
+            notes = []
+        if notes:
+            m_grid.add_row("method notes", Text(", ".join(notes)))
         m_keys = (
             "[b]M[/b] start/stop  [b]Ctrl+D[/b] device proxy  [b]Ctrl+N[/b] install CA\n"
             "[b]Ctrl+P[/b] SSL unpin  [b]Ctrl+R[/b] restart  [b]Ctrl+A[/b] addons\n"
@@ -2645,7 +2670,7 @@ class NetworkPanel(Widget):
         return InspectorContent(
             title="Network status",
             tabs=[("Mitmproxy", m_sections), ("friTap", f_sections)],
-            footer="Left/Right: tab",
+            footer="Left/Right tab",
             key=STATUS_KEY,
             lens=LENS_ID,
         )
@@ -2728,8 +2753,10 @@ class NetworkPanel(Widget):
 
         pal = lens_palette()
         view = get_network_method_service().view_cached()
+        # Brief: CA / pinning / SDK-runtime notes are on the Inspector's
+        # Network status page (I), not repeated on this line (N3-V2).
         return (
-            view.markup(pal.ok, pal.warn, pal.bad, pal.dim)
+            view.markup(pal.ok, pal.warn, pal.bad, pal.dim, brief=True)
             + f" [{pal.dim}]W changes it[/]"
         )
 

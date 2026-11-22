@@ -38,6 +38,7 @@ from rich.markup import escape as rich_escape
 from textual.widget import Widget
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
+from sandroid.tui.themes import fixed_color
 from sandroid.tui.utils.markup import escape
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
@@ -526,8 +527,9 @@ class MitmproxyPanel(Widget):
             node = node.parent
         return None
 
-    def _log(self, line: str, tag: str = "mitm") -> None:
-        """Write one controller line to the ActivityLog drawer, tagged ``mitm``.
+    def _log(self, line: str, tag: str = "Mitmproxy") -> None:
+        """Write one controller line to the ActivityLog drawer, tagged
+        ``Mitmproxy`` (or ``tag``, e.g. ``bypass``).
 
         ``line`` keeps its ``[INFO]``/``[ERROR]`` prefix convention; the prefix
         picks the colour and is dropped from the text. Best-effort: without a
@@ -540,6 +542,12 @@ class MitmproxyPanel(Widget):
             text, color = line[len("[INFO]") :].strip(), ""
         else:
             text, color = line.strip(), "#5b6479"
+        # "[OK]" / "[~]" mark a confirmation / a hint: the colour says it,
+        # the marker is dropped (no bracket glyphs in the log, N3-V4).
+        if text.startswith("[OK] "):
+            text, color = text[len("[OK] ") :], color or fixed_color("running")
+        elif text.startswith("[~] "):
+            text = text[len("[~] ") :]
         if not text:
             return
         self.recent_lines.append(("✗ " if color == "#fb7185" else "") + text)
@@ -811,18 +819,23 @@ class MitmproxyPanel(Widget):
     # -- compact status for the lens -----------------------------------------
 
     def status_caption(self) -> str:
-        """One calm caption fragment in words and theme colours, e.g.
-        ``Mitmproxy on :8090 · device routed · CA installed``.
+        """The lens title's Mitmproxy fragment: at most one problem, in red
+        or the warning colour; ``""`` while all is well (E2E N3-V2).
 
-        The port is the live process's, else the configured
-        ``mitmproxy.proxy_port`` -- never a hard-coded default.
+        What runs and where the device points is in the status bar, the
+        method line and the Inspector's Network status page; the title only
+        names what needs attention, the most severe first: Mitmproxy stopped
+        while traffic is routed to it (or failed to start), the device
+        cannot reach it, it is still starting, an App Proxy problem, the CA
+        is missing.
         """
         from sandroid.tui.themes import lens_palette
 
         pal = lens_palette()
         st = self._service.state
         if not self._service.is_running():
-            # A failure is red words (no dot); a clean stop is muted.
+            # A failure is red words (no dot); a clean stop says nothing
+            # here (the status bar shows "Mitmproxy ○ off").
             problem = []
             if st.last_error and st.last_error != "already running":
                 problem.append(escape(st.last_error))
@@ -830,36 +843,17 @@ class MitmproxyPanel(Widget):
                 problem.append("app traffic blocked")
             if problem:
                 return f"[{pal.bad}]Mitmproxy stopped: {', '.join(problem)}[/]"
-            return f"[{pal.dim}]Mitmproxy ○ off[/]"
-        if st.running and not st.listening:
-            parts = [f"[{pal.warn}]Mitmproxy ◌ starting[/] :{st.proxy_port}"]
-        else:
-            parts = [f"[{pal.ok}]Mitmproxy ● running[/] :{st.proxy_port}"]
+            return ""
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
-            parts.append(f"[{pal.bad}]device can't reach it[/]")
-        elif self._proxy_state == "ours":
-            parts.append("device routed")
-        elif self._proxy_state == "other":
-            parts.append(f"[{pal.dim}]device on another proxy[/]")
-        try:
-            from sandroid.core.proxy_manager import get_focus_manager
-
-            routes = get_focus_manager().app_proxies_cached()
-        except Exception:
-            routes = {}
-        if routes:
-            parts.append(f"app proxies {len(routes)}")
+            return f"[{pal.bad}]the device can't reach Mitmproxy[/]"
+        if st.running and not st.listening:
+            return f"[{pal.warn}]Mitmproxy ◌ starting[/]"
         problems = self._lane_problems()
         if problems:
-            parts.append(f"[{pal.warn}]{escape(problems)}[/]")
-        parts.append(
-            f"CA [{pal.ok}]● installed[/]"
-            if self._ca_ok
-            else f"CA [{pal.warn}]○ not installed[/]"
-        )
-        if self._service.ssl_unpin_is_active():
-            parts.append(f"unpin [{pal.ok}]● on[/]")
-        return " · ".join(parts)
+            return f"[{pal.warn}]{escape(problems)}[/]"
+        if not self._ca_ok:
+            return f"[{pal.warn}]CA ○ not installed[/]"
+        return ""
 
     def _routed_to_us(self) -> bool:
         """The device proxy or an App Proxy lane goes to our Mitmproxy."""
@@ -878,7 +872,7 @@ class MitmproxyPanel(Widget):
         st = self._service.state
         if not self._service.is_running():
             return (
-                f"No flows yet — space starts mitmproxy on :{st.proxy_port}",
+                f"No flows yet — Space starts Mitmproxy on :{st.proxy_port}",
                 "then Ctrl+D routes the device · Ctrl+N installs the CA · "
                 "y proxy settings",
             )
@@ -917,7 +911,7 @@ class MitmproxyPanel(Widget):
         running = self._service.is_running()
         rows = [
             (
-                "Mitmproxy web interface",
+                "Mitmproxy",
                 (
                     f"[{pal.ok}]● running[/]  {st.listen_host}:{st.proxy_port}, "
                     f"web interface :{st.web_port}"
@@ -1605,7 +1599,7 @@ class MitmproxyPanel(Widget):
                 self._proxy_state = "ours"
                 self._proxy_addr = addr
                 self._set_glance_device_proxy(addr)
-                self._append_line(f"[INFO] [OK] device proxy → {addr}")
+                self._append_line(f"[INFO] [OK] device proxy set to {addr}")
             else:
                 self._append_line("[ERROR] Failed to set device proxy")
         except Exception as exc:

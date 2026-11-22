@@ -1,7 +1,7 @@
-"""FriTap message formatting for activity log and console output.
+"""friTap message formatting for activity log and console output.
 
 Extracts the message parsing and formatting logic from the activity log wrapper,
-keeping the FriTap class focused on Frida session management.
+keeping the friTap class focused on Frida session management.
 """
 
 import ipaddress
@@ -104,5 +104,7 @@ class FriTapMessageFormatter:
         if len(parts) >= 2:
             key_type = parts[0]
             key_preview = parts[-1][:16] + "..." if len(parts[-1]) > 16 else parts[-1]
-            return f"🔑 {key_type}: {key_preview}"
-        return f"🔑 KEY: {keylog[:24]}..." if len(keylog) > 24 else f"🔑 {keylog}"
+            return f"TLS key {key_type}: {key_preview}"
+        return (
+            f"TLS key: {keylog[:24]}..." if len(keylog) > 24 else f"TLS key: {keylog}"
+        )
