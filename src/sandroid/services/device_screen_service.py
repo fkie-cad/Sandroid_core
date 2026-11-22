@@ -853,11 +853,20 @@ class DeviceScreenService:
         return True
 
     def _retire_client(self) -> None:
-        """Drop the client; the input thread closes it after queued input."""
+        """Drop the client; the input thread closes it after queued input.
+
+        A held touch / wheel drag is lifted on the retired client first (any
+        reason: hidden, switch, stream lost, refused), so no finger stays down
+        on the device and a later user UP is a harmless no-op. Both items are
+        queued under the lock, so the UP always precedes the close.
+        """
         with self._lock:
-            client, self._client = self._client, None
+            client = self._client
+            if client is None:
+                return
+            self._lift_locked()  # bound to ``client`` (still current here)
+            self._client = None
             self._client_epoch = -1
-        if client is not None:
             self._q.put(_Item("close", client=client))
 
     def _set_state(self, state: ScreenState, detail: str = "") -> None:
@@ -917,7 +926,9 @@ class DeviceScreenService:
 
         Bound explicitly (native px), so the UP still reaches that emulator
         when the client is retired right after (hide, switch, close): the
-        input thread closes a retired client only after it.
+        input thread closes a retired client only after it. Without a client
+        (the DOWN was queued unbound, before a connect), the UP is queued
+        unbound too, so it follows the DOWN to whichever client gets it.
         """
         points: list[tuple[int, int]] = []
         if self._wheel is not None:
@@ -928,6 +939,8 @@ class DeviceScreenService:
         self._touch = None
         client = self._client
         if client is None:
+            for x, y in points:
+                self._put_locked("up", x, y)
             return
         for x, y in points:
             nx, ny = to_native(x, y, self._rotation, *self._native)
@@ -958,7 +971,21 @@ class DeviceScreenService:
                 and item.args[0] in self.REPEAT_KEYS
                 and time.monotonic() - item.t > self.STALE_REPEAT_S
             ):
-                continue  # terminal auto-repeat backlog: stop on release
+                # A terminal auto-repeat backlog (held key behind slow input):
+                # drop a stale repeat only when the same key is queued right
+                # behind it, so the run collapses to its last press and stops
+                # on release. A single press is always sent.
+                try:
+                    pending = self._q.get_nowait()
+                except queue.Empty:
+                    pending = None
+                if (
+                    pending is not None
+                    and pending is not _STOP
+                    and pending.kind == "key"
+                    and pending.args[0] == item.args[0]
+                ):
+                    continue
             try:
                 last_key = self._send(item, last_key)
             except Exception as exc:

@@ -260,6 +260,7 @@ def test_layout_safe_and_to_native() -> None:
 # ---------------------------------------------------------------------------
 
 _CANCEL = object()
+_END = object()  # the server ends the stream
 
 
 class FakeStream:
@@ -273,6 +274,8 @@ class FakeStream:
             item = self.q.get()
             if item is _CANCEL:
                 raise ScreenRpcError("cancelled", "CANCELLED")
+            if item is _END:
+                return
             if isinstance(item, ScreenRpcError):
                 raise item
             yield item
@@ -718,9 +721,8 @@ def test_close_is_idempotent_and_stops_threads(rig: Any) -> None:
     assert r.svc.touch("down", 1, 1) is None  # a no-op after close
 
 
-def test_stale_key_repeats_are_dropped(rig: Any) -> None:
-    r = _connected(rig)
-    client = r.clients[-1]
+def _slow_paste(client: FakeClient) -> threading.Event:
+    """Make ``client.paste`` block (like the real one) until the event is set."""
     block = threading.Event()
     original = client.paste
 
@@ -729,14 +731,93 @@ def test_stale_key_repeats_are_dropped(rig: Any) -> None:
         original(text)
 
     client.paste = slow_paste  # type: ignore[method-assign]
+    return block
+
+
+def test_stale_key_repeat_backlog_collapses_to_one(rig: Any) -> None:
+    r = _connected(rig)
+    client = r.clients[-1]
+    block = _slow_paste(client)
     r.svc.text("Größe")  # occupies the input thread
-    for _ in range(5):
-        r.svc.key("Backspace")
+    for _ in range(8):
+        r.svc.key("Backspace")  # a held key's auto-repeat piles up
     r.svc.key("Enter")
     time.sleep(DeviceScreenService.STALE_REPEAT_S + 0.1)
     block.set()
     _wait(lambda: client.events and client.events[-1] == ("key", "Enter"))
-    assert ("key", "Backspace") not in client.events
+    assert client.events == [
+        ("paste", "Größe"),
+        ("key", "Backspace"),  # the last of the run; it stops on release
+        ("key", "Enter"),
+    ]
+
+
+def test_single_key_press_after_slow_input_is_delivered(rig: Any) -> None:
+    r = _connected(rig)
+    client = r.clients[-1]
+    block = _slow_paste(client)
+    r.svc.text("-")  # not layout-safe: the clipboard path, slow
+    r.svc.key("Backspace")  # one deliberate press right after
+    time.sleep(DeviceScreenService.STALE_REPEAT_S + 0.1)  # it is now stale
+    block.set()
+    _wait(lambda: ("key", "Backspace") in client.events)
+    assert client.events == [("paste", "-"), ("key", "Backspace")]
+
+
+# ---------------------------------------------------------------------------
+# Service: a held finger is lifted when the link retires a client
+# ---------------------------------------------------------------------------
+
+
+def _record_close(client: FakeClient) -> None:
+    """Log ``close`` into ``client.events`` so the order is checkable."""
+
+    def close() -> None:
+        client.events.append(("close",))
+        client.closed = True
+
+    client.close = close  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ScreenRpcError("other", "INTERNAL"),  # lost: an RPC error
+        None,  # lost: the server ended the stream
+        ScreenRpcError("auth", "UNAUTHENTICATED"),  # refused
+    ],
+    ids=["rpc-error", "stream-ended", "auth"],
+)
+def test_retired_client_gets_the_lift_before_close(
+    rig: Any, failure: ScreenRpcError | None
+) -> None:
+    r = _connected(rig)
+    stream = r.live_stream()
+    stream.frame()
+    r.wait_state(ScreenState.LIVE)
+    old = r.clients[-1]
+    _record_close(old)
+    r.svc.touch("down", 100, 200)
+    _wait(lambda: old.events == [("touch", 100, 200, 1024)])
+    stream.q.put(_END if failure is None else failure)
+    _wait(lambda: old.closed)
+    assert old.events == [
+        ("touch", 100, 200, 1024),
+        ("touch", 100, 200, 0),  # lifted before the channel closed
+        ("close",),
+    ]
+    assert r.svc._touch is None
+    # The user lets go later (during the backoff / refusal): harmless no-op.
+    assert r.svc.touch("up", 100, 200) is None
+    if failure is not None and failure.kind == "auth":
+        r.wait_state(ScreenState.AUTH_ERROR)
+        r.tokens["emulator-5554"] = "fresh"  # the emulator came back
+        r.svc.set_visible(True, (541, 1200))  # any wake-up
+    _wait(lambda: len(r.clients) == 2)
+    r.live_stream()  # reconnected
+    r.svc.key("GoHome")
+    _wait(lambda: r.clients[-1].events == [("key", "GoHome")])
+    assert old.events[-1] == ("close",)  # nothing stale after the close
 
 
 # ---------------------------------------------------------------------------
