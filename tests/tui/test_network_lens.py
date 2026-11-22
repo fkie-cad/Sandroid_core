@@ -2590,9 +2590,12 @@ async def test_proxy_dialog_method_tab_and_kill_switch(monkeypatch):
         await until(pilot, lambda: app.screen is modal and app.focused is not None)
         tabs = modal.query_one("#proxy-tabs", TabbedContent)
         assert tabs.active == "tab-device"  # opens where it always did
-        assert "Kill switch" in str(
-            modal.query_one("#kill-switch-checkbox", Checkbox).label
-        )
+        # A Checkbox label never wraps: the label is short, the explanation
+        # is a note below it that wraps (the one-line label was cut off).
+        box = modal.query_one("#kill-switch-checkbox", Checkbox)
+        assert str(box.label) == "Kill switch"
+        note = modal.query_one("#kill-switch-note")
+        assert "the rest is refused" in str(note.render())
         await pilot.press("shift+left")
         await until(pilot, lambda: tabs.active == "tab-method")
         modal.query_one("#nm-this_app", RadioButton).value = True
@@ -2668,7 +2671,11 @@ async def test_device_radios_start_on_the_choice_and_space_types(monkeypatch):
         assert field.value != " "
 
         box = modal.query_one("#kill-switch-checkbox", Checkbox)
-        assert str(box.label).endswith("refused")
+        # The label is short; the "refused" explanation is the note below
+        # it, which wraps instead of being cut.
+        assert str(box.label) == "Kill switch"
+        note = str(modal.query_one("#kill-switch-note").render())
+        assert note.rstrip(".").endswith("refused")
         assert len(str(box.label)) <= 70
 
         # V5: the CA actions are on screen at 120x35 without scrolling.
