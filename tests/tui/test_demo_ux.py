@@ -902,6 +902,56 @@ def test_snapshot_create_rejects_an_invalid_name_before_adb(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        (
+            "[dim]Esc=Cancel  Tab=Next  Enter/Space=Activate[/dim]",
+            "[dim]Tab next · Enter/Space activate · Esc cancel[/dim]",
+        ),
+        ("[dim]y/Enter=Quit  n/q/Esc=Cancel[/dim]", "[dim]y/Enter quit · n/q/Esc cancel[/dim]"),
+        ("Esc=Cancel | ↑↓=Navigate", "Up/Down navigate · Esc cancel"),
+        ("Enter=OK  g/G=Top/Bottom", "Enter OK · g/Shift+G top/bottom"),
+        ("p=Push CA, ●=running", "p push CA · ● running"),
+        ("[dim]Type to search  Enter/Esc=Exit search[/dim]",
+         "[dim]Type to search · Enter/Esc exit search[/dim]"),
+        ("No hints here", "No hints here"),
+    ],
+)  # fmt: skip
+def test_hint_words_one_style_for_every_dialog(raw, shown) -> None:
+    from sandroid.tui.key_display import hint_words
+
+    assert hint_words(raw) == shown
+
+
+async def test_dialog_footers_use_the_lens_hint_style() -> None:
+    """Every KeyHintFooter hint reads "Key action · ...", never "Key=Action"."""
+    from textual.app import App
+    from textual.widgets import Button
+
+    from sandroid.tui.modals.base import KeyHintFooter
+
+    footer = KeyHintFooter(hints={"button": "[dim]Enter=OK  Esc=Close[/dim]"})
+    footer.set_hint("list", "j/k=Navigate | Enter=Select")
+    for text in footer._hints.values():
+        assert "=" not in text, text
+        assert not set(KEY_WORDS_GLYPHS) & set(text), text
+
+    class _Host(App):
+        def compose(self):
+            yield footer
+
+    async with _Host().run_test() as pilot:
+        await pilot.pause()
+        assert str(footer.render()) == "Tab next · Esc cancel"
+        footer.update_for_widget(Button("OK"))
+        await pilot.pause()
+        assert str(footer.render()) == "Enter OK · Esc close"
+
+
+KEY_WORDS_GLYPHS = "←→↑↓⏎↵⇧⌥⌫⇥"
+
+
 def test_key_labels_are_words_in_both_styles() -> None:
     """No key glyphs in the footer (compact) or help/palette (long) labels."""
     from sandroid.tui.key_display import KEY_WORDS, format_key, key_words

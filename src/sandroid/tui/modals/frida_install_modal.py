@@ -258,8 +258,8 @@ class FridaInstallModal(FridaModal[FridaInstallResult]):
 
             yield KeyHintFooter(
                 hints={
-                    "default": "[dim]Enter/Y/F=Install  Esc/N=Cancel[/dim]",
-                    "button": "[dim]Enter/Y/F=Install  Esc/N=Cancel[/dim]",
+                    "default": "[dim]Enter/y/f=Install  Esc/n=Cancel[/dim]",
+                    "button": "[dim]Enter/y/f=Install  Esc/n=Cancel[/dim]",
                 }
             )
 

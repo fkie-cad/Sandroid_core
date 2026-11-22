@@ -388,10 +388,11 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
             yield Static("", id="settings-error", classes="settings-error")
             yield Static(
+                # main's keys, in the one hint style (Key action · …, Esc last)
                 "[dim]"
                 + key_words(
-                    "Ctrl+S save  Esc cancel  Tab / Shift+Tab next / previous "
-                    "field  Shift+Left / Shift+Right tab"
+                    "Ctrl+S save · Tab / Shift+Tab next / previous field · "
+                    "Shift+Left / Shift+Right tab · Esc cancel"
                 )
                 + "[/dim]",
                 classes="settings-footer",

@@ -143,3 +143,61 @@ def format_key(key: str | None, style: str = "long") -> str:
     order = [m for m in ("ctrl", "alt", "shift") if m in mods]
     order += [m for m in mods if m not in ("ctrl", "alt", "shift")]
     return "+".join([m.title() for m in order] + [label])
+
+
+#: Separators between hints in hand-written hint lines: " | ", ", " or a run
+#: of two or more spaces.
+_HINT_SPLIT = re.compile(r"\s*\|\s*|,\s+|\s{2,}")
+_MARKUP_WRAP = re.compile(r"^\[dim\](.*)\[/dim\]$", re.S)
+#: ``Key=Action`` (the key part has no spaces; ``=`` itself never is a key).
+_KEY_ACTION = re.compile(r"^(?P<key>[^\s=]+)=(?P<action>\S.*)$")
+
+
+def _lower_words(action: str) -> str:
+    """``Top/Bottom`` -> ``top/bottom``; acronyms (``OK``, ``CA``) stay."""
+
+    def one(word: str) -> str:
+        if len(word) > 1 and word[:2].isupper():
+            return word
+        return word[:1].lower() + word[1:]
+
+    return re.sub(r"[^\s/()]+", lambda m: one(m.group(0)), action)
+
+
+def _key_part(key: str) -> str:
+    """A bare upper-case letter in a hint is Shift+letter (``g/G``)."""
+    return "/".join(
+        SHIFT_PREFIX + k if len(k) == 1 and k.isalpha() and k.isupper() else k
+        for k in key.split("/")
+    )
+
+
+def hint_words(text: str) -> str:
+    """One style for every key-hint line: ``Key action · Key action``.
+
+    Hand-written hints came in three styles (``Esc=Cancel  Tab=Next``,
+    ``Esc cancel``, ``Left/Right: tab``). This turns the ``Key=Action``
+    style into the lens style: the key, a space, the action in lower case,
+    `` · `` between hints, Esc last, glyphs as words. Text that is not a
+    ``Key=Action`` pair ("Type to search") is kept as it is.
+
+    A ``[dim]...[/dim]`` wrapper is kept around the result.
+    """
+    wrapped = _MARKUP_WRAP.match(text.strip())
+    body = wrapped.group(1) if wrapped else text.strip()
+    parts = [p for p in _HINT_SPLIT.split(key_words(body)) if p]
+    if not any(_KEY_ACTION.match(p) for p in parts):
+        return text
+    hints: list[str] = []
+    escape: list[str] = []
+    for part in parts:
+        m = _KEY_ACTION.match(part)
+        if m:
+            key = _key_part(m.group("key").replace("UpDown", "Up/Down"))
+            part = f"{key} {_lower_words(m.group('action'))}"
+            if key.split("/")[0] == "Esc":
+                escape.append(part)
+                continue
+        hints.append(part)
+    line = " · ".join(hints + escape)
+    return f"[dim]{line}[/dim]" if wrapped else line
