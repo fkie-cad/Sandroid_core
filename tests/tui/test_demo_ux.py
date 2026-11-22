@@ -599,6 +599,41 @@ async def test_palette_shows_no_key_the_tui_does_not_bind(monkeypatch) -> None:
     )
 
 
+@pytest.mark.parametrize("size", [(100, 30), (200, 50)])
+async def test_palette_rows_are_one_line_each_and_the_screen_stays_put(size) -> None:
+    """One line per command (no wrapped half-descriptions), keys as words
+    without brackets or magenta, the hint always shown, and the screen
+    behind the palette is not pushed down (screen padding shifted it).
+    """
+    from sandroid.tui.screens.command_palette import CommandPalette
+
+    app = _app()
+    async with app.run_test(size=size) as pilot:
+        await boot(app, pilot)
+        await pilot.press("ctrl+shift+p")
+        await settle(pilot)
+        assert isinstance(app.screen, CommandPalette)
+        palette = app.screen
+        assert palette.styles.padding.top == 0
+        results = palette.query_one("#palette-results")
+        text = str(results.render())
+        assert "[" not in text  # no "[    r]" key brackets
+        rows = palette._rows()
+        lines = text.splitlines()
+        assert len(lines) <= rows + 1  # the rows plus "N more"
+        # Every command row is drawn on one screen line.
+        assert results.size.height <= len(lines)
+        hint = palette.query_one("#palette-hint")
+        assert str(hint.render()) == "Enter run · Up/Down choose · Esc close"
+        assert (
+            hint.region.bottom <= palette.query_one("#palette-container").region.bottom
+        )
+        # The selection never moves to a row that is not drawn.
+        for _ in range(rows + 2):
+            await pilot.press("down")
+        assert 0 <= palette._selected_index < rows
+
+
 async def test_quit_command_uses_tui_quit_path() -> None:
     from sandroid.commands.base import CommandContext
     from sandroid.commands.system_commands import QuitCommand
