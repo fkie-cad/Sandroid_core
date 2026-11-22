@@ -324,12 +324,14 @@ def report_tool_progress(
     matched: int | None = None,
     note: str = "",
     force: bool = False,
+    failed: int | None = None,
 ) -> bool:
     """Send a ``tool_progress`` event for the running tool call (any thread).
 
     Throttled to one event per :data:`PROGRESS_INTERVAL_S` per call (unless
     *force*). A no-op outside a tool call. Payload: ``{call_id, name?, done,
-    total, matched, note}``.
+    total, matched, note}``, plus ``failed`` (items that could not be
+    processed, counted in *done*) when given.
 
     Returns:
         Whether an event was sent.
@@ -344,6 +346,7 @@ def report_tool_progress(
         if not force and last is not None and now - last < PROGRESS_INTERVAL_S:
             return False
         _progress_last[call_id] = now
+    extra = {} if failed is None else {"failed": int(failed)}
     ctx.emit(
         "tool_progress",
         call_id=call_id,
@@ -351,6 +354,7 @@ def report_tool_progress(
         total=None if total is None else int(total),
         matched=None if matched is None else int(matched),
         note=str(note or ""),
+        **extra,
     )
     return True
 

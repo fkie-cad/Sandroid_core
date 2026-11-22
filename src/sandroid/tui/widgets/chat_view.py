@@ -410,7 +410,8 @@ def progress_text(payload: Mapping[str, Any]) -> str:
     """Chip text of a ``tool_progress`` payload.
 
     ``{"note": "classifying", "done": 120, "total": 412, "matched": 9}`` ->
-    ``"classifying 120/412 · 9 matched"``.
+    ``"classifying 120/412 · 9 matched"``; a ``failed`` count above zero adds
+    ``" · 40 failed"`` (failed items are part of *done*).
     """
     note = str(payload.get("note") or "working")
     done = payload.get("done")
@@ -421,6 +422,9 @@ def progress_text(payload: Mapping[str, Any]) -> str:
     matched = payload.get("matched")
     if isinstance(matched, int):
         text += f" · {matched} matched"
+    failed = payload.get("failed")
+    if isinstance(failed, int) and failed > 0:
+        text += f" · {failed} failed"
     return text
 
 

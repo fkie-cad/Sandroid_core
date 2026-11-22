@@ -484,7 +484,13 @@ class AIRowClassifyConfig(BaseModel):
         ),
     )
     max_tokens: int = Field(
-        default=4096, ge=256, le=32_768, description="Output tokens per request"
+        default=16_384,
+        ge=256,
+        le=32_768,
+        description=(
+            "Output tokens per request, reasoning included (a cut-off reply "
+            "is retried with double, up to 32768)"
+        ),
     )
 
 

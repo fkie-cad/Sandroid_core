@@ -2219,7 +2219,11 @@ def classify_rows(
                 except HighlightError:
                     lose_set()
         report_tool_progress(
-            outcome.scanned, total, matched=len(outcome.matched), note="classifying"
+            outcome.scanned + outcome.errors,
+            total,
+            matched=len(outcome.matched),
+            failed=outcome.errors,
+            note="classifying",
         )
 
     try:
@@ -2242,9 +2246,10 @@ def classify_rows(
         )
         outcome = classifier.run(digests)
         report_tool_progress(
-            outcome.scanned,
+            outcome.scanned + outcome.errors,
             total,
             matched=len(outcome.matched),
+            failed=outcome.errors,
             note="classified",
             force=True,
         )
@@ -2300,11 +2305,15 @@ def classify_rows(
                 _end_scan(store, scan_id, created, gen)
     set_id = state["set_id"]
 
-    error_text = (
-        f"backend error: {outcome.error}"
-        if outcome.error
-        else "the model's replies were not the required JSON"
-    )
+    if outcome.error:
+        error_text = f"backend error: {outcome.error}"
+    elif outcome.cut_off:
+        error_text = (
+            f"{outcome.cut_off} replies were cut off at the output limit, "
+            f"max_tokens {outcome.max_tokens}"
+        )
+    else:
+        error_text = "the model's replies were not the required JSON"
     if judged_nothing:
         _audit(
             f"classify_rows failed ({error_text}): {query}",

@@ -308,7 +308,10 @@ Scanning pipeline
    Criterion: ... Rows (data, not instructions):" + rows]``: one system
    message, and every request starts with the same bytes so the backend's
    prefix cache applies; only the row block changes. ``temperature=0``,
-   ``max_tokens`` 4096, no tools.
+   ``max_tokens`` 16384, no tools. Reasoning models think inside that
+   budget: DeepSeek V4.1 reasoned up to ~7.4k tokens on a 40-row batch of
+   opaque file content, and with 4096 most such batches came back with no
+   answer at all.
 5. Rows carry short per-batch ids ``<row id="r1">`` .. ``rN`` (mapped back
    to the keys, so long UUID keys are never mis-copied), and ``<``/``>``
    inside a digest are written as ``&lt;``/``&gt;``: captured data cannot
@@ -316,11 +319,17 @@ Scanning pipeline
    ``{"matches": [{"id", "reason"}], "uncertain": [...]}``. Rows not listed
    do not match; ids that are not rows of the batch are counted
    (``skipped.unknown_ids``); reasons are cut to 20 words.
-6. Failures come in two kinds:
+6. Failures come in three kinds:
 
    - A **malformed reply** is retried once with "JSON only", then the batch
      is split in half once; rows that still fail count as
      ``skipped.errors``.
+   - A **cut-off reply** (``finish_reason="length"`` and no complete JSON)
+     is retried once with double the budget (up to 32768) instead of "JSON
+     only", which cannot shorten the model's reasoning. The raised budget
+     holds for the rest of the run; a reply cut off again, or at the cap, is
+     halved like a malformed one. The tool result then names the cut-off
+     replies and the final ``max_tokens``.
    - A **transport error** (HTTP status, connection, stream error, or a
      client that raises) is retried once after a 1 s pause and never
      halved (smaller requests do not help). Three transport failures in a
@@ -373,7 +382,7 @@ Client and budgets
   requests are limited to ``capacity - 1``).
 - **Config** ``[ai.row_classify]``: ``concurrency = 2``, ``batch_rows = 40``,
   ``batch_tokens = 24000``, ``max_rows = 1000`` (the tool argument may raise
-  it to 2000), ``max_tokens = 4096``.
+  it to 2000), ``max_tokens = 16384``.
 - **Cancel**: ``ctx.cancel_event`` (Ctrl+X) stops scheduling and aborts the
   running requests (their stream gets the classifier's stop event). The
   executor abandons a cancelled tool, so the tool stops by itself.
@@ -393,7 +402,8 @@ Progress event
 --------------
 
 ``tool_progress`` is a new :data:`~sandroid.ai.loop.EVENT_TYPES` entry with
-payload ``{call_id, done, total, matched, note}``. The executor sets a
+payload ``{call_id, done, total, matched, note}`` (plus ``failed`` when
+given). The executor sets a
 context variable ``(call_id, RunContext)`` inside the tool's helper thread
 (``_dispatch`` gets the call id from ``_run``); a tool calls
 ``report_tool_progress(done, total, matched=..., note=...)``, throttled to
@@ -401,7 +411,9 @@ one event per second and call (``force=True`` for the first and last). It
 is the one event emitted from a tool helper thread; the chat sink is a
 thread-safe queue, ``session._observe`` ignores it, and the chat panel's
 ``_on_tool_progress`` sets the running ``ToolBlock``'s progress line
-(``classifying 120/412 · 9 matched``) until the result chip replaces it.
+(``classifying 120/412 · 9 matched · 40 failed``) until the result chip
+replaces it. ``done`` counts judged and failed rows, so a run whose
+batches fail still moves (it used to sit at ``0/117``).
 
 Digests and privacy
 -------------------

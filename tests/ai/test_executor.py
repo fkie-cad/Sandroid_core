@@ -270,7 +270,9 @@ def test_tool_progress_carries_the_call_id_and_is_throttled(perm_store, arbiter)
         seen["call_id"] = current_call_id()
         sent = [report_tool_progress(0, 10, matched=0, note="classifying", force=True)]
         sent.append(report_tool_progress(5, 10, matched=1, note="classifying"))
-        sent.append(report_tool_progress(10, 10, matched=2, note="done", force=True))
+        sent.append(
+            report_tool_progress(10, 10, matched=2, failed=3, note="done", force=True)
+        )
         seen["sent"] = sent
         return {"ok": True}
 
@@ -288,6 +290,7 @@ def test_tool_progress_carries_the_call_id_and_is_throttled(perm_store, arbiter)
         "matched": 0,
         "note": "classifying",
     }
+    assert progress[1].payload["failed"] == 3  # only sent when given
     types = [e.type for e in events]
     assert types.index("tool_call") < types.index("tool_progress")
     # Outside a tool call it is a no-op.

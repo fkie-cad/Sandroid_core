@@ -36,7 +36,11 @@ def _no_retry_pause(monkeypatch):
 
 
 class FakeClient:
-    """Answers each request with ``reply(keys, messages)`` (thread-safe)."""
+    """Answers each request with ``reply(keys, messages)`` (thread-safe).
+
+    ``reply`` may return ``(text, finish_reason)``; ``budgets`` records each
+    request's ``max_tokens``.
+    """
 
     model = "fake"
 
@@ -47,10 +51,12 @@ class FakeClient:
         self.lock = threading.Lock()
         self.in_flight = 0
         self.peak = 0
+        self.budgets: list = []
 
     def stream(self, messages, tools=None, *, cancel_event=None, **kwargs):
         with self.lock:
             self.calls.append(messages)
+            self.budgets.append(kwargs.get("max_tokens"))
             self.in_flight += 1
             self.peak = max(self.peak, self.in_flight)
         try:
@@ -67,10 +73,14 @@ class FakeClient:
             if isinstance(text, StreamChunk):
                 yield text
                 return
-            yield StreamChunk("text", text=text)
+            finish = "stop"
+            if isinstance(text, tuple):
+                text, finish = text
+            if text:
+                yield StreamChunk("text", text=text)
             yield StreamChunk(
                 "done",
-                finish_reason="stop",
+                finish_reason=finish,
                 usage=Usage(prompt_tokens=100, completion_tokens=10),
             )
         finally:
@@ -216,6 +226,105 @@ def test_rows_count_as_errors_when_the_halves_fail_too():
     assert outcome.partial is True
     assert outcome.stop_reason is None
     assert outcome.verdicts == []
+
+
+def test_default_budget_leaves_room_for_reasoning():
+    client = FakeClient()
+    rc.RowClassifier(client, lens="files", criterion="c").run(digests(2))
+    assert rc.DEFAULT_MAX_TOKENS == 16_384
+    assert client.budgets == [16_384]
+
+
+def test_a_cut_off_reply_is_retried_with_double_the_budget_not_strict():
+    def reply(keys, messages):
+        return ("", "length") if len(client.calls) == 1 else match_all(keys, messages)
+
+    client = FakeClient(reply)
+    outcome = rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=4096
+    ).run(digests(4))
+    assert client.budgets == [4096, 8192]
+    assert all(len(m) == 2 for m in client.calls)  # no "JSON only" message
+    assert [len(keys_of(m)) for m in client.calls] == [4, 4]  # no halving
+    assert len(outcome.matched) == 4
+    assert outcome.errors == 0
+    assert outcome.cut_off == 1
+    assert outcome.max_tokens == 8192
+    assert outcome.partial is False
+
+
+def test_a_truncated_json_reply_counts_as_cut_off():
+    def reply(keys, messages):
+        if len(client.calls) == 1:
+            return ('{"matches": [{"id": "r1", "reason": "body.em', "length")
+        return match_all(keys, messages)
+
+    client = FakeClient(reply)
+    outcome = rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=4096
+    ).run(digests(2))
+    assert client.budgets == [4096, 8192]
+    assert outcome.cut_off == 1
+    assert len(outcome.matched) == 2
+
+
+def test_the_raised_budget_holds_for_the_next_batches():
+    def reply(keys, messages):
+        return ("", "length") if len(client.calls) == 1 else match_all(keys, messages)
+
+    client = FakeClient(reply)
+    rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=4096, batch_rows=2
+    ).run(digests(6))
+    assert client.budgets == [4096, 8192, 8192, 8192]
+
+
+def test_cut_off_twice_halves_the_batch_at_the_raised_budget():
+    def reply(keys, messages):
+        return ("", "length") if len(keys) == 4 else match_all(keys, messages)
+
+    client = FakeClient(reply)
+    outcome = rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=4096
+    ).run(digests(4))
+    assert [
+        (len(keys_of(m)), b) for m, b in zip(client.calls, client.budgets, strict=True)
+    ] == [
+        (4, 4096),
+        (4, 8192),
+        (2, 16_384),
+        (2, 16_384),
+    ]
+    assert all(len(m) == 2 for m in client.calls)
+    assert len(outcome.matched) == 4
+    assert outcome.cut_off == 2
+    assert outcome.errors == 0
+
+
+def test_a_cut_off_reply_at_the_cap_is_halved_straight_away():
+    def reply(keys, messages):
+        return ("", "length") if len(keys) == 4 else match_all(keys, messages)
+
+    client = FakeClient(reply)
+    outcome = rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=rc.MAX_TOKENS_CAP
+    ).run(digests(4))
+    assert [len(keys_of(m)) for m in client.calls] == [4, 2, 2]
+    assert set(client.budgets) == {rc.MAX_TOKENS_CAP}
+    assert len(outcome.matched) == 4
+
+
+def test_a_malformed_reply_that_was_not_cut_off_keeps_the_strict_retry():
+    def reply(keys, messages):
+        return "not json" if len(client.calls) == 1 else match_all(keys, messages)
+
+    client = FakeClient(reply)
+    outcome = rc.RowClassifier(
+        client, lens="files", criterion="c", max_tokens=4096
+    ).run(digests(2))
+    assert client.budgets == [4096, 4096]
+    assert client.calls[1][-1] == {"role": "user", "content": ROW_CLASSIFIER_RETRY}
+    assert outcome.cut_off == 0
 
 
 def _http_error(message="HTTP 429 rate limited"):

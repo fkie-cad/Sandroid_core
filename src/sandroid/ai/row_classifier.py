@@ -31,7 +31,11 @@ Two parts, both without Textual:
   (``r1``..``rN``, mapped back to keys) and ``<``/``>`` inside a digest are
   escaped, so captured data cannot close or open a row. The model answers
   strict JSON; a malformed answer is retried once, then the batch is halved
-  once, then its rows count as errors. A transport failure (HTTP,
+  once, then its rows count as errors. A reply cut off at ``max_tokens``
+  (reasoning models think inside that budget; a long think leaves no
+  answer) is not a malformed answer: it is retried with double the budget,
+  up to :data:`MAX_TOKENS_CAP`, and the raised budget holds for the rest of
+  the run; at the cap the batch is halved straight away. A transport failure (HTTP,
   connection, stream) is retried once after a short pause and never
   halved; three in a row stop the whole run (``backend_error``). Errored
   rows are not "scanned"; any error makes the run partial. ``cancel_event``
@@ -106,7 +110,13 @@ _SECRET_HEADERS = frozenset(
 DEFAULT_CONCURRENCY = 2
 DEFAULT_BATCH_ROWS = 40
 DEFAULT_BATCH_TOKENS = 24_000
-DEFAULT_MAX_TOKENS = 4096
+#: Output budget per request. Reasoning counts against it: DeepSeek V4.1
+#: reasoned up to ~7.4k tokens on a 40-row batch of opaque file content
+#: (measured 2026-11-22), and 4096 left no answer at all for 2 of 3 batches.
+#: Only the tokens used are paid for, so the headroom costs nothing.
+DEFAULT_MAX_TOKENS = 16_384
+#: Highest budget a cut-off reply's retry may ask for.
+MAX_TOKENS_CAP = 32_768
 #: Stop scheduling batches when fewer seconds than this are left.
 STOP_SCHEDULING_S = 30.0
 #: Abort running requests when fewer seconds than this are left.
@@ -1576,6 +1586,7 @@ class BatchResult:
     bytes_sent: int = 0
     tokens: int = 0
     cancelled: bool = False
+    cut_off: int = 0
 
 
 @dataclass
@@ -1585,7 +1596,9 @@ class ClassifyOutcome:
     ``scanned`` counts judged rows only; ``errors`` rows that could not be
     judged. ``partial`` is set when the run stopped early or any row errored.
     ``stop_reason``: ``cancelled``, ``deadline``, ``backend_error`` (three
-    transport failures in a row) or ``session_switched``.
+    transport failures in a row) or ``session_switched``. ``cut_off``
+    counts replies that hit the output budget; ``max_tokens`` is the budget
+    the run ended with (raised after a cut-off reply).
     """
 
     verdicts: list[Verdict] = field(default_factory=list)
@@ -1598,6 +1611,8 @@ class ClassifyOutcome:
     requests: int = 0
     partial: bool = False
     stop_reason: str | None = None
+    cut_off: int = 0
+    max_tokens: int = 0
 
     @property
     def matched(self) -> list[Verdict]:
@@ -1610,6 +1625,20 @@ class ClassifyOutcome:
 
 class ModelReplyError(Exception):
     """The answer was not the expected JSON (retried, then the batch halved)."""
+
+
+class ReplyCutOffError(ModelReplyError):
+    """The reply hit ``max_tokens`` before its JSON was complete.
+
+    Retried with a larger budget instead of the strict retry (asking for
+    "only JSON" does not shorten the model's reasoning).
+    """
+
+    def __init__(self, budget: int, raised: int | None) -> None:
+        """The *budget* the reply ran out of and the *raised* one (None: cap)."""
+        super().__init__(f"reply cut off at max_tokens={budget}")
+        self.budget = budget
+        self.raised = raised
 
 
 class TransportError(Exception):
@@ -1782,7 +1811,8 @@ class RowClassifier:
             concurrency: Requests in flight.
             batch_rows: Rows per batch.
             batch_tokens: Approximate digest tokens per batch.
-            max_tokens: Output limit per request.
+            max_tokens: Output limit per request (raised for the rest of
+                the run when a reply is cut off, up to MAX_TOKENS_CAP).
             cancel_event: Stops the run (Ctrl+X).
             deadline: ``time.monotonic()`` by which the run must have
                 returned (``None``: none).
@@ -1797,6 +1827,8 @@ class RowClassifier:
         self.batch_rows = max(1, int(batch_rows))
         self.batch_tokens = max(500, int(batch_tokens))
         self.max_tokens = max(256, int(max_tokens))
+        #: The budget requests use now (raised after a cut-off reply).
+        self._budget = self.max_tokens
         self.cancel_event = cancel_event or threading.Event()
         self.deadline = deadline
         self.on_batch = on_batch
@@ -1881,6 +1913,7 @@ class RowClassifier:
         if self._halt_reason is not None:
             outcome.stop_reason = outcome.stop_reason or self._halt_reason
         outcome.requests = self.requests
+        outcome.max_tokens = self._budget
         outcome.error = outcome.error or self.last_error
         outcome.partial = outcome.stop_reason is not None or outcome.errors > 0
         return outcome
@@ -1891,6 +1924,7 @@ class RowClassifier:
         outcome.scanned += result.judged
         outcome.errors += result.errors
         outcome.unknown_ids += result.unknown_ids
+        outcome.cut_off += result.cut_off
         if result.error:
             outcome.error = result.error
         outcome.verdicts.extend(result.verdicts)
@@ -1944,12 +1978,33 @@ class RowClassifier:
         result.verdicts = verdicts
         return result
 
+    def _raise_budget(self, budget: int) -> int | None:
+        """The budget after a reply was cut off at *budget* (None: at the cap).
+
+        Sticky for the run: the next batches would need it too.
+        """
+        with self._lock:
+            if budget >= MAX_TOKENS_CAP:
+                return None
+            self._budget = max(self._budget, min(budget * 2, MAX_TOKENS_CAP))
+            return self._budget
+
     def _attempt_with_retry(
         self, batch: list[Digest], acc: BatchResult
     ) -> list[Verdict]:
-        """A bad reply: one strict retry. A transport error: one paused retry."""
+        """A bad reply: one strict retry. A cut-off reply: one retry with a
+        larger budget (at the cap: halve). A transport error: one paused retry.
+        """
         try:
             return self._attempt(batch, acc, strict=False)
+        except ReplyCutOffError as first:
+            if first.raised is None:  # already at the cap: halve
+                raise ModelReplyError(str(first)) from first
+            logger.debug("classifier %s, retrying with %d", first, first.raised)
+            try:
+                return self._attempt(batch, acc, strict=False)
+            except ReplyCutOffError as again:
+                raise ModelReplyError(str(again)) from again
         except ModelReplyError as first:
             logger.debug("classifier reply rejected, retrying: %s", first)
             return self._attempt(batch, acc, strict=True)
@@ -1977,6 +2032,8 @@ class RowClassifier:
         if self._stop.is_set():
             raise _CancelledError
         messages = build_messages(self.lens, self.criterion, batch, strict=strict)
+        with self._lock:
+            budget = self._budget
         size = sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
         sent = False
         text_parts: list[str] = []
@@ -1986,7 +2043,7 @@ class RowClassifier:
                 messages,
                 None,
                 temperature=0.0,
-                max_tokens=self.max_tokens,
+                max_tokens=budget,
                 cancel_event=self._stop,
             )
             try:
@@ -2028,9 +2085,15 @@ class RowClassifier:
             self._transport_failed(message)
             raise TransportError(message)
         self._transport_ok()
-        verdicts, unknown = parse_reply_counted(
-            "".join(text_parts), [d.key for d in batch]
-        )
+        try:
+            verdicts, unknown = parse_reply_counted(
+                "".join(text_parts), [d.key for d in batch]
+            )
+        except ModelReplyError as exc:
+            if getattr(terminal, "finish_reason", None) == "length":
+                acc.cut_off += 1
+                raise ReplyCutOffError(budget, self._raise_budget(budget)) from exc
+            raise
         acc.unknown_ids += unknown
         return verdicts
 
@@ -2041,11 +2104,13 @@ class _CancelledError(Exception):
 
 __all__ = [
     "ABORT_S",
+    "MAX_TOKENS_CAP",
     "STOP_SCHEDULING_S",
     "BatchResult",
     "ClassifyOutcome",
     "Digest",
     "ModelReplyError",
+    "ReplyCutOffError",
     "RowClassifier",
     "TransportError",
     "Verdict",

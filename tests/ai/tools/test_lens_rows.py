@@ -544,6 +544,7 @@ def test_classify_rows_highlights_live_and_reports(
         "done": 3,
         "total": 3,
         "matched": 2,
+        "failed": 0,
         "note": "classified",
     }
 
@@ -805,6 +806,48 @@ def test_classify_rows_reports_rows_it_could_not_judge(
     assert hs.complete is False
     assert hs.stats["errors"] == 1
     assert set(hs.reasons) == {"a1"}
+
+
+class CutOffClient:
+    """Thinks past max_tokens (no answer) on rows whose digest has ``cut_on``."""
+
+    model = "fake"
+
+    def __init__(self, cut_on):
+        self.cut_on = cut_on
+        self.budgets: list = []
+        self.ok = PiiClient()
+
+    def stream(self, messages, tools=None, **kwargs):
+        self.budgets.append(kwargs.get("max_tokens"))
+        if self.cut_on in messages[1]["content"]:
+            yield StreamChunk("reasoning", text="hmm " * 50)
+            yield StreamChunk("done", finish_reason="length")
+            return
+        yield from self.ok.stream(messages, tools, **kwargs)
+
+
+def test_classify_rows_counts_failed_rows_in_progress_and_names_cut_offs(
+    store, flow_dir, run_ctx, monkeypatch, one_row_batches
+):
+    ctx, events = run_ctx
+    client = CutOffClient("other.net")
+    _use_client(monkeypatch, client)
+    result = lens_rows.classify_rows(
+        "network", "personal data", where={"kind": ["flow"]}
+    )
+    assert result["scanned"] == 2
+    assert result["skipped"]["errors"] == 1
+    assert result["partial"] is True
+    # The cut-off row: 4096, retried at 8192, halving is impossible (1 row).
+    i = client.budgets.index(8192)
+    assert client.budgets[i - 1] == 4096
+    assert (
+        "1 rows could not be judged (2 replies were cut off at the output "
+        "limit, max_tokens 16384)" in result["summary"]
+    )
+    last = [e for e in events if e.type == "tool_progress"][-1].payload
+    assert (last["done"], last["total"], last["failed"]) == (3, 3, 1)
 
 
 # -- verifier findings: the set goes away mid-run ----------------------------------------------

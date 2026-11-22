@@ -48,6 +48,7 @@ from sandroid.tui.widgets.chat_view import (
     format_tokens,
     humanize_tool_name,
     meter_style,
+    progress_text,
     resolve_mascot_style,
     ruled,
 )
@@ -731,3 +732,13 @@ async def test_transcript_starts_at_the_top_then_follows_the_end() -> None:
         await settle(pilot)
         assert t.is_anchored
         assert t.scroll_y == t.max_scroll_y > 0
+
+
+def test_progress_text_shows_failed_rows_only_when_there_are_some():
+    base = {"note": "classifying", "done": 80, "total": 117, "matched": 4}
+    assert progress_text(base) == "classifying 80/117 · 4 matched"
+    assert progress_text({**base, "failed": 0}) == "classifying 80/117 · 4 matched"
+    assert (
+        progress_text({**base, "failed": 40})
+        == "classifying 80/117 · 4 matched · 40 failed"
+    )
