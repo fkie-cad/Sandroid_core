@@ -1728,7 +1728,7 @@ class MainScreen(Screen):
             self._device_open = True
             self._device_seq = next(self._open_order)
             col.set_class(True, "-open")
-            self.app.set_class(True, "-device-open")
+            self.set_class(True, "-device-open")
             self._device_policy_sent = None
             self._sync_device_policy()
             self._fit_device_col()
@@ -1753,7 +1753,7 @@ class MainScreen(Screen):
         col = self._device_col()
         if col is not None:
             col.set_class(False, "-open")
-        self.app.set_class(False, "-device-open")
+        self.set_class(False, "-device-open")
         self._sync_device_active()
         self.refresh_bindings()
         if refocus:

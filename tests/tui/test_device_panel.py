@@ -315,7 +315,7 @@ async def test_ctrl_g_opens_focuses_and_closes(fake) -> None:
         dev = await _open(pilot, ms)
         assert is_shown(col)
         assert ms.focused is dev
-        assert app.has_class("-device-open")
+        assert ms.has_class("-device-open")
         assert fake.sink is dev
         await until(pilot, lambda: fake.visible and fake.visible[0])
         assert fake.visible[1] == dev.geometry.stream_px
@@ -337,7 +337,7 @@ async def test_ctrl_g_opens_focuses_and_closes(fake) -> None:
         await settle(pilot)
         assert not ms.device_is_open
         assert not is_shown(col)
-        assert not app.has_class("-device-open")
+        assert not ms.has_class("-device-open")
         assert ms.focused is not dev
         await until(pilot, lambda: fake.visible == (False, (0, 0)))
         assert fake.of("lift")
@@ -744,8 +744,34 @@ async def test_a_toast_does_not_cover_the_phone(fake) -> None:
         await until(pilot, lambda: bool(app.screen.query(Toast)))
         await settle(pilot)
         col = _col(ms)
-        for toast in app.screen.query(Toast):
-            assert not toast.region.overlaps(col.region)
+        toasts = list(app.screen.query(Toast))
+        assert toasts
+        for toast in toasts:
+            assert toast.region.width > 0
+            assert toast.region.right <= col.region.x, (toast.region, col.region)
+
+
+async def test_a_toast_does_not_cover_a_column_restored_at_startup(fake) -> None:
+    """Restored from ui_state while MainScreen mounts (found on device: the
+    toast rack kept its bottom-right alignment and covered the column)."""
+    from textual.widgets._toast import Toast
+
+    from sandroid.config.ui_state import update_ui_state
+
+    update_ui_state("device_screen", {"open": True})
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        ms = await boot(app, pilot)
+        await until(pilot, lambda: ms.device_is_open and is_shown(_col(ms)))
+        app.notify("No spotlight app. Press c (use the foreground app) first.")
+        await until(pilot, lambda: bool(app.screen.query(Toast)))
+        await settle(pilot)
+        col = _col(ms)
+        toasts = list(app.screen.query(Toast))
+        assert toasts
+        for toast in toasts:
+            assert toast.region.width > 0
+            assert toast.region.right <= col.region.x, (toast.region, col.region)
 
 
 async def test_writer_backlog_drops_new_frames(fake, monkeypatch) -> None:

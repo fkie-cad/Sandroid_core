@@ -147,12 +147,14 @@ class SandroidTUI(App):
     #: rack is invisible, but its vertical scrollbar gutter (2 columns) kept
     #: every toast off the right edge, so the end of the log ticker's hint
     #: (the "g" of "` log") showed beside the toast (R3).
-    #: While the device screen column is open (``-device-open``) toasts
+    #: While the device screen column is open (MainScreen ``-device-open``) toasts
     #: sit bottom-left: bottom-right they would cover the phone, and a
-    #: graphics image is hidden while anything overlaps it.
+    #: graphics image is hidden while anything overlaps it. Each toast sits
+    #: in a full-width ToastHolder (align-horizontal: right); the rack's own
+    #: align does not move it.
     CSS = """
     ToastRack { scrollbar-size-vertical: 0; }
-    .-device-open ToastRack { align: left bottom; }
+    .-device-open ToastHolder { align-horizontal: left; }
     """
     ENABLE_COMMAND_PALETTE = False  # we use our own CommandPalette
     #: Open Devices when the post-start check finds no device (the test suite,
