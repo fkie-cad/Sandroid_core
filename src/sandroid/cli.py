@@ -488,6 +488,13 @@ def main(
             install_launch_hooks()
         except Exception as e:
             logger.debug(f"Failed to install the identity SIM launch hooks: {e}")
+        # Live device screen: start emulators with -grpc (idempotent, light).
+        try:
+            from .core.emulator_grpc import install_launch_hooks as install_grpc
+
+            install_grpc()
+        except Exception as e:
+            logger.debug(f"Failed to install the device screen launch hook: {e}")
 
         if avd:
             # Uses the configured SDK/adb paths, hence after set_config().

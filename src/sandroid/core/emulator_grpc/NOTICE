@@ -1,0 +1,24 @@
+Android Emulator gRPC interface (vendored)
+==========================================
+
+emulator_controller.proto
+    Copyright (C) 2018 The Android Open Source Project.
+    Licensed under the Apache License, Version 2.0
+    (http://www.apache.org/licenses/LICENSE-2.0).
+    Origin: the Android Open Source Project's emulator sources
+    (shipped with the Android SDK as emulator/lib/emulator_controller.proto,
+    taken from emulator 35.4.9). Unmodified.
+
+emulator_controller_pb2.py, emulator_controller_pb2_grpc.py
+    Generated from emulator_controller.proto with grpcio-tools 1.85.3
+    (protobuf gencode 7.35.1):
+
+        python -m grpc_tools.protoc -I <sdk>/emulator/lib \
+            --python_out=. --grpc_python_out=. emulator_controller.proto
+
+    Derived from the Apache-2.0 licensed file above. One modification:
+    emulator_controller_pb2_grpc.py imports emulator_controller_pb2
+    package-relative ("from . import emulator_controller_pb2").
+
+The rest of this package (__init__.py, support.py, client.py) is part of
+Sandroid and under Sandroid's license.

@@ -99,6 +99,9 @@ dependencies = [
     # sandroid.core.privacy_markers matches ~70k identity-marker needles in
     # one Aho-Corasick pass per haystack (Apache-2.0, releases the GIL).
     "ahocorasick-rs>=1.0.3,<2",
+    # Frames of the live device screen are numpy views (also used by
+    # matplotlib already).
+    "numpy>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -126,13 +129,21 @@ dev = [
     "safety>=2.0.0",
     "pre-commit>=3.0.0",
 ]
+# Live device screen (Ctrl+G): the emulator's gRPC API. The vendored stubs
+# in sandroid/core/emulator_grpc were generated with grpcio-tools 1.85.3 and
+# protobuf gencode 7.35.1 (runtime must be >= 7.35.1 and < 8). grpcio only
+# where it ships wheels; elsewhere the column says "install sandroid[screen]".
+screen = [
+    "grpcio>=1.85.3; sys_platform == 'darwin' or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    "protobuf>=7.35.1,<8",
+]
 docs = [
     "sphinx>=6.0.0",
     "sphinx-rtd-theme>=1.2.0",
     "myst-parser>=1.0.0",
 ]
 full = [
-    "Sandroid[ai,static-analysis]",
+    "Sandroid[ai,static-analysis,screen]",
 ]
 
 [project.scripts]
@@ -175,6 +186,8 @@ sandroid = [
     "assets/world/photos/*.md",
     "assets/world/photos/screenshots/*.png",
     "assets/worldhelper/*.jar",
+    "core/emulator_grpc/*.proto",
+    "core/emulator_grpc/NOTICE",
     "world/*.md",
     "tui/*.tcss",
     "tui/themes/*.tcss",
@@ -200,6 +213,7 @@ extend-exclude = '''
   | build
   | dist
 )/
+| /src/sandroid/core/emulator_grpc/emulator_controller_pb2(_grpc)?\.py
 '''
 
 [tool.isort]
@@ -258,6 +272,14 @@ warn_unreachable = false
 strict_equality = false
 show_error_codes = false
 
+[[tool.mypy.overrides]]
+# Generated protobuf/gRPC stubs (vendored, not edited).
+module = [
+    "sandroid.core.emulator_grpc.emulator_controller_pb2",
+    "sandroid.core.emulator_grpc.emulator_controller_pb2_grpc",
+]
+ignore_errors = true
+
 [tool.coverage.run]
 source = ["src/sandroid"]
 omit = [
@@ -279,6 +301,8 @@ exclude_lines = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
+# Generated protobuf/gRPC stubs (vendored, not edited).
+extend-exclude = ["src/sandroid/core/emulator_grpc/emulator_controller_pb2*.py"]
 
 [tool.ruff.lint]
 select = [

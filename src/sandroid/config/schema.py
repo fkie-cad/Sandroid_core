@@ -864,6 +864,57 @@ class ChatDockConfig(BaseModel):
         return min(CHAT_DOCK_PRESETS, key=lambda p: abs(p - float(v)))
 
 
+#: Terminal graphics backends of the live device screen.
+DEVICE_SCREEN_BACKENDS: tuple[str, ...] = (
+    "auto",
+    "iterm",
+    "kitty",
+    "sixel",
+    "halfblock",
+)
+
+
+class DeviceScreenConfig(BaseModel):
+    """Live device screen column (Ctrl+G); needs the ``screen`` extra."""
+
+    grpc_on_launch: bool = Field(
+        default=True,
+        description="Start every emulator Sandroid launches with "
+        "'-grpc <port> -grpc-use-token' (when the screen extra is installed), "
+        "so its screen can be shown live.",
+    )
+    max_fps: int = Field(
+        default=60,
+        ge=1,
+        le=120,
+        description="Most frames per second the device screen draws.",
+    )
+    bezel: bool = Field(
+        default=True,
+        description="Draw a phone bezel around the device screen.",
+    )
+    touch_marker: bool = Field(
+        default=True,
+        description="Show a ring where the mouse touches the device screen.",
+    )
+    backend: str = Field(
+        default="auto",
+        description="Terminal graphics: auto, iterm, kitty, sixel or halfblock.",
+    )
+
+    @field_validator("backend")
+    @classmethod
+    def _check_backend(cls, v: str) -> str:
+        """Validate the graphics backend name."""
+        value = str(v).strip().lower()
+        if value not in DEVICE_SCREEN_BACKENDS:
+            raise ValueError(
+                f"Invalid device_screen.backend: {v}. Must be one of: "
+                f"{', '.join(DEVICE_SCREEN_BACKENDS)}"
+            )
+        return value
+
+
 class TUIConfig(BaseModel):
     """TUI (Terminal User Interface) configuration."""
 
@@ -976,6 +1027,10 @@ class TUIConfig(BaseModel):
     chat_dock: ChatDockConfig = Field(
         default_factory=ChatDockConfig,
         description="AI chat dock size (Shift+Up/Down or drag its top border).",
+    )
+    device_screen: DeviceScreenConfig = Field(
+        default_factory=DeviceScreenConfig,
+        description="Live device screen column (Ctrl+G).",
     )
     snapshot_save_mode: str = Field(
         default="ask",
