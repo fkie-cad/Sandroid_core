@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
     from textual import events
     from textual.app import ComposeResult
+    from textual.timer import Timer
 
     from sandroid.services.device_screen_service import DeviceScreenServiceProtocol
 
@@ -664,6 +665,7 @@ class DeviceScreen(Widget, can_focus=True):
         self.policy = policy
         self._cell_px_fixed = cell_px
         self._cell_cache: tuple[float, float] | None = None
+        self._geom_retry: Timer | None = None
         caps = terminal_graphics.result()
         if backend is None:
             backend = caps.backend if caps is not None else "halfblock"
@@ -809,6 +811,9 @@ class DeviceScreen(Widget, can_focus=True):
 
     def on_hide(self) -> None:
         self.lift()
+
+    def on_show(self) -> None:
+        self.call_after_refresh(self._refresh_geom)
 
     def on_blur(self, _event: events.Blur) -> None:
         self.lift()
@@ -1014,9 +1019,17 @@ class DeviceScreen(Widget, can_focus=True):
         """The current geometry (None before the first layout)."""
         return self._geom
 
+    #: While the geometry is None on a shown widget, look again this often.
+    #: The graphics backends recompute on every paint; half-block (and a
+    #: widget placed after its last Resize) would otherwise stay blank.
+    GEOM_RETRY_S = 0.1
+
     def _refresh_geom(self) -> bool:
         self._update_bg()
         geom = self._current_geom()
+        if geom is None and self.is_mounted and self.display:
+            if self._geom_retry is None:
+                self._geom_retry = self.set_timer(self.GEOM_RETRY_S, self._retry_geom)
         if geom == self._geom:
             return False
         with self._lock:
@@ -1025,6 +1038,11 @@ class DeviceScreen(Widget, can_focus=True):
         self._wake.set()
         self._send_visible()
         return True
+
+    def _retry_geom(self) -> None:
+        self._geom_retry = None
+        if self.is_mounted:
+            self._refresh_geom()
 
     def _update_bg(self) -> None:
         """Background outside the phone body = what Textual paints here."""
