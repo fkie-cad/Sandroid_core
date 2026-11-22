@@ -600,7 +600,7 @@ async def test_N_toggles_noise_and_the_caption_counts_it() -> None:
             now=T0,
         )
         assert _keys(panel) == [PREFS]
-        assert "1 hidden: prefix 1" in panel.caption()[1]
+        assert "1 hidden" in panel.caption()[1]
         panel.table.focus()
         await pilot.press("v")  # v is only "review" (Runs lens) now
         await pilot.pause()
@@ -1436,7 +1436,7 @@ async def test_home_end_move_the_cursor_and_O_sorts_by_name() -> None:
         await pilot.press("O")
         await pilot.pause()
         assert [k.rsplit("/", 1)[1] for k in _keys(panel)] == ["f_1", "f_2", "f_10"]
-        assert "by name" in panel.caption()[1]
+        assert "by name" in panel.caption()[0]  # a mode: in the title
 
 
 @pytest.mark.asyncio
@@ -1790,7 +1790,7 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
 
         assert modal.add_rule("hide", "suffix", ".log")
         assert f"{ROOT}/files/app.log" not in _keys(panel)
-        assert "1 hidden: suffix 1" in panel.caption()[1]
+        assert "1 hidden" in panel.caption()[1]
         # N1-V11: only the user's change is saved, not every default.
         log_rule = {
             "action": "hide",
@@ -2001,7 +2001,7 @@ async def test_monitor_off_caption_when_files_are_watched() -> None:
         panel = app.query_one(FilesPanel)
         await pilot.pause()
         panel.refresh_rows()
-        hint = "monitor off — watched files not tracked · o starts it"
+        hint = "watched files not tracked · o starts"
         assert hint in panel.caption()[1]
         _register_monitor()
         panel.refresh_rows()
@@ -3022,7 +3022,8 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         assert _keys(panel) == [DB, AAID, PREFS]  # newest last
         assert panel.following
         assert panel._cursor_key() == PREFS
-        assert _markup_plain(panel.caption()[0]) == "live · monitor ○ off"
+        # No "live" while the monitor is off (it records nothing).
+        assert _markup_plain(panel.caption()[0]) == "monitor ○ off"
         # A change moves its row to the bottom; following keeps up with it.
         panel.ingest(
             _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=5)
@@ -3049,16 +3050,18 @@ async def test_newest_change_is_at_the_bottom_and_followed_until_moving_up() -> 
         await settle(pilot)
         assert panel.following
         assert panel._cursor_key() == AAID
-        assert panel.caption()[0].startswith("live · ")
+        # Following, but the monitor is off: no "live" in the title.
+        assert _markup_plain(panel.caption()[0]) == "monitor ○ off"
         # A click on a row above the newest one stops following too.
         await pilot.click("#files-table", offset=(5, 0))
         await settle(pilot)
         assert not panel.following
         assert panel._cursor_key() == PREFS
-        # Sorted by name / count there is no "newest": no follow wording.
+        # Sorted by name / count there is no "newest": no follow wording
+        # (the order is a mode, in the title).
         await pilot.press("O")
         await settle(pilot)
-        assert _markup_plain(panel.caption()[0]) == "monitor ○ off"
+        assert _markup_plain(panel.caption()[0]) == "by name · monitor ○ off"
 
 
 async def _three_changes(app):
@@ -3407,7 +3410,7 @@ async def test_the_row_cap_says_what_it_dropped_once_and_keeps_watched_rows() ->
         panel.refresh_rows()
         assert kept in panel.activity.paths  # the oldest, but watched
         assert f"{ROOT}/d1/f" not in panel.activity.paths
-        assert "10 dropped at the 50-row limit" in panel.caption()[1]
+        assert "10 dropped (cap 50)" in panel.caption()[1]
         cap_notes = [n for n in notes if "tui.monitor_max_lines" in n]
         assert len(cap_notes) == 1  # once, not per batch
         await pilot.pause()
@@ -3457,7 +3460,7 @@ async def test_M_hides_rows_like_this_one_for_the_session_or_always(
         assert not set(logs) & set(_keys(panel))
         assert saved == []
         assert panel.activity.rules.rules[-1].session
-        assert "2 hidden: prefix 2" in panel.caption()[1]
+        assert "2 hidden" in panel.caption()[1]
         # R lists it as "this session"; removing it there undoes it.
         panel.table.focus()
         await pilot.press("R")
@@ -3506,7 +3509,7 @@ async def test_W_shows_only_watched_files() -> None:
         await pilot.press("W")
         await settle(pilot)
         assert _keys(panel) == [DB]
-        assert "watched only · W all" in panel.caption()[1]
+        assert "watched only" in panel.caption()[0]  # a mode: in the title
         await pilot.press("W")
         await settle(pilot)
         assert set(_keys(panel)) == {DB, PREFS, AAID}

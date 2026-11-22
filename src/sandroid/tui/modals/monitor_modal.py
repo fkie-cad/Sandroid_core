@@ -63,9 +63,14 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
     #: The mode picked last time ("pid"/"path"), for the next open.
     _last_mode: str | None = None
+    #: The paths started with last time and the app they were for: the
+    #: next open for the same app lists them again (extra Path entries).
+    _last_paths: list[str] | None = None
+    _last_app: str | None = None
 
     DEFAULT_CSS = """
     MonitorConfigModal .modal-container {
+        border: round $primary;  /* round, like the lens frames */
         width: 75;
         max-width: 90%;
         max-height: 95%;
@@ -86,14 +91,14 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
     MonitorConfigModal #spotlight-info {
         color: $text-muted;
         background: $panel;
-        border: solid $foreground-muted;
+        border: round $foreground-muted;
         padding: 0 1;
         margin-bottom: 1;
         height: auto;
     }
 
     MonitorConfigModal #spotlight-info.has-app {
-        border: solid $success;
+        border: round $success;
     }
 
     MonitorConfigModal #mode-section {
@@ -111,16 +116,16 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         width: 100%;
         height: auto;
         background: transparent;
-        border: solid transparent;
+        border: round transparent;
         padding: 0;
     }
 
     MonitorConfigModal RadioSet:focus {
-        border: solid $primary;
+        border: round $primary;
     }
 
     MonitorConfigModal RadioSet:focus-within {
-        border: solid $primary;
+        border: round $primary;
     }
 
     MonitorConfigModal RadioButton {
@@ -477,7 +482,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             with Vertical(id="path-section"):
                 yield Label("Target Path:", id="path-label")
                 with Vertical(id="path-rows"):
-                    yield self._make_path_row(self._default_path)
+                    for path in self._initial_paths():
+                        yield self._make_path_row(path)
                 if self._effective_kprobe:
                     yield Button("+ Add path", id="path-add", classes="-secondary")
                 else:
@@ -510,16 +516,43 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                     "default": "[dim]Enter=Start  Space=Toggle  Esc=Cancel  "
                     "Tab=Navigate[/dim]",
                     "input": "[dim]Enter=Start  Tab=Next  Esc=Cancel[/dim]",
-                    "radioset": "[dim]↑↓=Select Mode  Space=Toggle  Tab=Next  Esc=Cancel[/dim]",
+                    "radioset": "[dim]Up/Down=Select Mode  Space=Toggle  Tab=Next  "
+                    "Esc=Cancel[/dim]",
                 }
             )
+
+    def _initial_paths(self) -> list[str]:
+        """The path rows to open with: the last start's paths for the same
+        app (its extra Path entries too, kprobe only), else the default.
+        """
+        last = MonitorConfigModal._last_paths
+        if (
+            last
+            and self._effective_kprobe
+            and MonitorConfigModal._last_app == self._get_package_name()
+        ):
+            return list(last)
+        return [self._default_path]
+
+    def _sync_follow(self, mode_id: str | None) -> None:
+        """The "Follow the app" option is for App mode: dimmed in Path mode."""
+        try:
+            follow = self.query_one("#follow-app", Checkbox)
+        except Exception:
+            return
+        follow.disabled = mode_id == "mode-path"
 
     def on_mount(self) -> None:
         """Focus appropriate widget on mount."""
         super().on_mount()
         try:
-            # Focus the RadioSet if it exists (when PID is available)
+            # Focus the RadioSet if it exists (when PID is available), its
+            # highlight on the chosen mode (it started on the first one).
             radio_set = self.query_one("#mode-select", RadioSet)
+            if radio_set.pressed_index >= 0:
+                radio_set._selected = radio_set.pressed_index
+            pressed = radio_set.pressed_button
+            self._sync_follow(pressed.id if pressed is not None else None)
             radio_set.focus()
         except Exception:
             # No RadioSet (path-only mode), focus the first path input instead
@@ -600,6 +633,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         """Handle mode selection change."""
+        self._sync_follow(event.pressed.id)
         # Update path hint based on mode
         try:
             path_hint = self.query_one("#path-hint", Label)
@@ -815,6 +849,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             mode = self._get_selected_mode()
             if self._has_mode_choice:
                 MonitorConfigModal._last_mode = mode
+            MonitorConfigModal._last_paths = list(paths)
+            MonitorConfigModal._last_app = self._get_package_name()
 
             config = MonitorConfig(
                 cancelled=False,

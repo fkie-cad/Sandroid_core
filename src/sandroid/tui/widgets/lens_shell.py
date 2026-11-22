@@ -441,6 +441,80 @@ def _as_text(markup: str) -> Text:
 
 
 # ---------------------------------------------------------------------------
+# paths that wrap at "/" (Inspector subtitle, toasts)
+# ---------------------------------------------------------------------------
+
+_SLASH_PART = re.compile(r"[^/]*/|[^/]+")
+
+
+def slash_lines(text: str, width: int) -> list[str]:
+    """``text`` in lines of at most ``width`` cells, broken after a ``/``.
+
+    Rich and Textual wrap at spaces only, so a device path broke mid-word
+    ("…/k3m7y" + "jvw.default/…"). Words (space-separated) stay whole when
+    they fit; a longer word breaks after its slashes, and only a single
+    path part longer than ``width`` is cut.
+    """
+    width = max(1, int(width))
+    lines: list[str] = []
+    line = ""
+    for word in text.split(" "):
+        parts = [word] if len(word) <= width else _SLASH_PART.findall(word)
+        for i, part in enumerate(parts or [""]):
+            joint = " " if i == 0 and line else ""
+            if len(line) + len(joint) + len(part) <= width:
+                line += joint + part
+                continue
+            if line:
+                lines.append(line)
+            while len(part) > width:
+                lines.append(part[:width])
+                part = part[width:]
+            line = part
+    lines.append(line)
+    return lines
+
+
+class SlashWrap:
+    """A Rich renderable: ``text`` wrapped at ``/`` (see :func:`slash_lines`)
+    to the width it gets; styles of a ``Text`` are kept.
+    """
+
+    def __init__(self, text: str | Text, style: str = "") -> None:
+        self.text = text if isinstance(text, Text) else Text(text, style=style)
+
+    def __rich_console__(self, console, options):
+        plain = self.text.plain
+        offset = 0
+        for line in slash_lines(plain, options.max_width):
+            start = plain.index(line, offset) if line else offset
+            piece = self.text[start : start + len(line)]
+            piece.no_wrap = True
+            yield piece
+            offset = start + len(line)
+
+    def __rich_measure__(self, console, options):
+        from rich.measure import Measurement
+
+        plain = self.text.plain
+        parts = _SLASH_PART.findall(plain) or [""]
+        longest = max(len(p) for p in parts)
+        return Measurement(min(longest, options.max_width), len(plain))
+
+
+def toast_paths(app: Any, message: str) -> str:
+    """``message`` pre-wrapped at ``/`` for a toast (Textual's toast is 60
+    cells, at most half the screen: padding and its left border take 3).
+    """
+    try:
+        screen = int(app.size.width)
+    except Exception:
+        screen = 120
+    width = min(60, max(20, screen // 2)) - 3
+    return "\n".join(slash_lines(message, width))
+
+
+# ---------------------------------------------------------------------------
 # header
 # ---------------------------------------------------------------------------
 
@@ -1016,7 +1090,12 @@ class Inspector(Vertical):
         self.border_subtitle = "   ".join(hints)
         try:
             sub = self.query_one("#inspector-subtitle", Static)
-            sub.update(_as_text(content.subtitle) if content.subtitle else "")
+            # A path (no spaces) wraps after its slashes, never mid-word.
+            subtitle = _as_text(content.subtitle) if content.subtitle else None
+            if subtitle is not None and " " not in subtitle.plain:
+                sub.update(SlashWrap(subtitle))
+            else:
+                sub.update(subtitle or "")
             sub.display = bool(content.subtitle)
         except Exception:
             pass

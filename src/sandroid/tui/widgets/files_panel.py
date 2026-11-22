@@ -15,8 +15,13 @@ the cursor sticks to that newest row. ↑, PgUp, Home, a wheel up or a click
 on a row above the newest one stop following (the monitor keeps recording),
 ``End`` resumes, also with a file open in the Inspector (which then follows
 the newest row); the caption title says ``live`` or ``scrolled back · 3 new
-below · End = live`` (rows that changed since, ★ rows included).
-The frame title says ``monitor ● on`` / ``monitor ○ off`` for the monitor.
+below · End = live`` (rows that changed since, ★ rows included; no
+``live`` while the monitor is off or blind: it records nothing).
+The frame title says ``monitor ● on`` / ``monitor ○ off`` for the monitor,
+after the modes (``watched only``, ``by name``). The info line is short
+(``191 paths + 11 groups · 3 watched · 298 hidden · 262 dropped (cap
+500)``) and fitted to the frame: key hints, then hidden / dropped counts,
+then the path count go first; filters and lost events stay.
 
 Rows come from the file monitor (``o`` starts/stops it): each
 ``TASK_OUTPUT``/``source="monitor"`` batch is folded into
@@ -74,6 +79,18 @@ UUIDs) fold from 8. Watched and AI-highlighted files keep their own rows.
 With the Inspector open, the cursor on a group row shows its op counts
 and time span.
 
+**Atomic writes**: a temp file renamed onto its final file in the same
+folder (``x.0.tmp`` -> ``x.0``, ``data.safe.tmp`` -> ``data.safe.bin``)
+shows in the final file's row (summed ops and count), not as a second row;
+the Inspector names the temp file and Events keep the rename. ``N`` shows
+both rows raw. Display only: activity, pulls and results are untouched.
+
+**Paths**: app-relative, a browser profile folder (``<salt>.default``)
+as ``@profile/``; the files below an open group show their path inside it;
+sibling rows that must be shortened share one shortened folder prefix.
+``.`` shows full paths; the Inspector subtitle and toasts break paths
+after a ``/``, never mid-word.
+
 **Row cap** (``tui.monitor_max_lines``, default 500 rows, a group row is
 one): rows hidden by a rule go first, then open-only rows, then the oldest
 shown rows; watched and AI-highlighted rows never. The caption says how
@@ -82,8 +99,7 @@ many were dropped, and the first drop says so once.
 **Auto-pull** (``tui.auto_pull_on_change``, default on): a write the monitor
 reports for a ★ file pulls it once the writes are quiet (~1.5 s), see
 ``WatchlistView.note_write``. No polling: with the monitor off and files
-watched the caption says "monitor off — watched files not tracked · o
-starts it".
+watched the caption says "watched files not tracked · o starts".
 
 **Monitor status** (``MonitorWatch`` of the running session): the caption
 says what is recorded and how to stop it ("App org.x · 5 proc · following
@@ -160,7 +176,15 @@ from .highlight_bar import (
     file_snapshot,
     own_read_events,
 )
-from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
+from .lens_shell import (
+    InspectorContent,
+    Mark,
+    SessionMarks,
+    ShellHeader,
+    SlashWrap,
+    is_shown,
+    toast_paths,
+)
 from .monitor_view import (
     OPS,
     FileActivity,
@@ -193,8 +217,9 @@ logger = logging.getLogger(__name__)
 #: How often a dirty table is redrawn (monitor batches arrive every ~0.15 s).
 _REFRESH_INTERVAL = 0.4
 
-#: Fixed column widths (★, ops, count, last); the path takes the rest.
-_W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 5, 8
+#: Fixed column widths (★, ops, count, last); the path takes the rest. The
+#: count fits ``9999x`` exactly and ``94.8kx`` compact (``count_text``).
+_W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 6, 8
 #: The Identity column (values of the identity profile found in the file).
 _W_IDENT = 16
 
@@ -345,6 +370,22 @@ def diff_markup(diff: str | list[str]) -> str:
     return "\n".join(line if _is_markup(line) else escape(line) for line in lines)
 
 
+def count_text(n: int) -> str:
+    """A row's event count in at most ``_W_COUNT`` cells, the times sign
+    kept: ``812x``, ``9999x``, ``94.8kx``, ``123kx``, ``1.2Mx`` (x = the
+    times sign). Exact counts are in the Inspector.
+    """
+    if n < 10_000:
+        return f"{n}×"
+    for div, unit in ((1_000, "k"), (1_000_000, "M"), (1_000_000_000, "G")):
+        value = n / div
+        if round(value, 1) < 100:
+            return f"{value:.1f}{unit}×"
+        if round(value) < 1_000:
+            return f"{round(value)}{unit}×"
+    return f"{n // 1_000_000_000}G×"
+
+
 def _fmt_time(when: datetime | None) -> str:
     return when.strftime("%H:%M:%S") if when else ""
 
@@ -401,6 +442,11 @@ def collapse_follow_notes(
     return out
 
 
+def _event_kind(ev) -> tuple:
+    """What makes two Events lines the same, apart from their time."""
+    return (ev.label, ev.category, ev.via, ev.source, ev.other, ev.process, ev.pid)
+
+
 def _fmt_span(span: timedelta) -> str:
     """``under 1 s`` / ``4 s`` / ``2 min 5 s`` / ``1 h 3 min``."""
     secs = int(span.total_seconds())
@@ -443,10 +489,80 @@ class _Row:
     members: list[_Row] = field(default_factory=list)
     #: 1 for a member row shown below its expanded group.
     depth: int = 0
+    #: The folder of the expanded group a member row is shown under (its
+    #: path is shown relative to it; None under the idle ★ fold).
+    under: str | None = None
     #: The group row folding the idle ★ rows (``group`` is ``IDLE_FOLD``).
     fold: bool = False
     #: A group made by auto-grouping (many touched siblings), not a rule.
     auto: bool = False
+    #: Temp files renamed onto this row's file (an atomic write: "x.tmp"
+    #: renamed to "x"), shown in this row instead of their own (display
+    #: only; see ``atomic_rename_target``).
+    folded: list[_Row] = field(default_factory=list)
+
+
+#: A browser profile folder (Gecko: ``<8 chars>.default``,
+#: ``….default-release``) and everything above it in an app-relative path.
+_PROFILE_DIR_RE = re.compile(r"^(?:[^/]+/)*?[a-z0-9]{8}\.default[A-Za-z0-9_-]*/")
+#: What the lens shows instead (the Inspector has the full path).
+PROFILE_MARK = "@profile/"
+#: A shared, shortened folder prefix needs this many cells, else a row
+#: truncates on its own (``FilesPanel._folder_rooms``).
+_MIN_DIR_ROOM = 8
+
+
+def short_profile(rel: str) -> str:
+    """``files/mozilla/k3m7yjvw.default/cookies.sqlite`` ->
+    ``@profile/cookies.sqlite`` (like ``@de/`` and ``@ext/`` of
+    ``app_relative``); other paths pass through.
+    """
+    match = _PROFILE_DIR_RE.match(rel)
+    if match is None or match.end() >= len(rel):
+        return rel
+    return PROFILE_MARK + rel[match.end() :]
+
+
+def atomic_rename_target(act: PathActivity | None) -> str | None:
+    """Where the temp file of an atomic write went, else None.
+
+    An atomic write creates ``x.0.tmp`` (``.new``, ``-tmp``, ``-new.bin``
+    ...), writes it and renames it onto ``x.0``. The lens showed two rows
+    for it (about a third of Firefox's rows). The temp file folds into its
+    final file's row when it was renamed away (and nothing re-created it)
+    within its folder onto a name it starts with that is not longer than
+    its own. ``prefs.xml`` -> ``prefs.xml.bak`` (a backup) stays a row.
+    """
+    moved = act.moved_to if act is not None else None
+    if not moved:
+        return None
+    src_dir, _, src = act.key.rpartition("/")
+    dst_dir, _, dst = moved.rpartition("/")
+    if src_dir != dst_dir or not src or not dst or src == dst:
+        return None
+    stem = dst.lstrip(".").split(".", 1)[0]
+    if not stem or len(src) < len(dst) or not src.lstrip(".").startswith(stem):
+        return None
+    return moved
+
+
+def _fold_stats(dest: SegmentStats, temps: list[SegmentStats]) -> SegmentStats:
+    """``dest`` with the events of its temp files added (a new object: the
+    activity's own stats share their ``ops`` dict). The temp file's
+    "renamed away" event is the final file's own rename: counted once.
+    """
+    out = SegmentStats(dest.count, dict(dest.ops), dest.first, dest.last)
+    for stats in temps:
+        for cat, n in stats.ops.items():
+            if cat == "rename":
+                continue
+            out.ops[cat] = out.ops.get(cat, 0) + n
+            out.count += n
+        if stats.first and (out.first is None or stats.first < out.first):
+            out.first = stats.first
+        if stats.last and (out.last is None or stats.last > out.last):
+            out.last = stats.last
+    return out
 
 
 def _hl_key(row: _Row) -> str | None:
@@ -822,6 +938,8 @@ class FilesPanel(Widget):
         self._rows: list[_Row] = []
         self._dirty = True
         self._path_width = 0
+        #: Shown folder -> the cells its shared prefix may take (refresh_rows).
+        self._dir_rooms: dict[str, int] = {}
         #: The table width the columns were last laid out for.
         self._layout_width = 0
         #: Keys of the ★ rows with activity in the view (tinted rows).
@@ -1273,6 +1391,8 @@ class FilesPanel(Widget):
         grouping = not (self.activity.show_all or self._hl.filter_id())
         auto_min = self.activity.auto_group_min if grouping else 0
         candidates: list[_Row] = []
+        #: Shown file rows (not watched), before grouping.
+        plain: list[_Row] = []
         if wl is not None:
             for path in wl.rows:
                 pinned[path] = _Row(key=path, watched=path, dim=segment is not None)
@@ -1309,6 +1429,12 @@ class FilesPanel(Widget):
             if reason is not None and not self._hl.bypass_noise(canonical_key(key)):
                 hidden[reason] = hidden.get(reason, 0) + 1
                 continue
+            plain.append(row)
+        self._hidden = hidden
+        if grouping:
+            plain = self._fold_atomic_renames(plain, pinned)
+        for row in plain:
+            key = row.key
             folder = self.activity.rules.group_of(key) if grouping else None
             if folder is not None:
                 groups.setdefault(folder, []).append(row)
@@ -1316,7 +1442,6 @@ class FilesPanel(Widget):
                 candidates.append(row)  # an AI-highlighted file stays a row
             else:
                 rest.append(row)
-        self._hidden = hidden
         auto = auto_group_folders((r.key for r in candidates), auto_min)
         for row in candidates:
             folder = row.key.rpartition("/")[0]
@@ -1366,6 +1491,7 @@ class FilesPanel(Widget):
             if row.group is not None and row.group in self._expanded:
                 for member in sorted(row.members, key=order):
                     member.depth = 1
+                    member.under = None if row.fold else row.group
                     out.append(member)
         return out
 
@@ -1376,6 +1502,40 @@ class FilesPanel(Widget):
         if stats is None or not stats.ops or self.activity.show_all:
             return False
         return all(self.activity.category_mode(c) == "verbose" for c in stats.ops)
+
+    def _fold_atomic_renames(
+        self, plain: list[_Row], pinned: dict[str, _Row]
+    ) -> list[_Row]:
+        """Fold each atomic write's temp file into its final file's row
+        (``atomic_rename_target``): one row per write instead of two.
+
+        Only shown rows fold (both sides passed the filters and rules); an
+        AI-highlighted temp file keeps its row. The final file's row shows
+        the summed ops and counts; its Inspector names the temp file and its
+        Events keep the rename. Display only: the activity is untouched.
+        """
+        by_key = {r.key: r for r in plain}
+        out: list[_Row] = []
+        for row in plain:
+            target = atomic_rename_target(row.activity)
+            dest = by_key.get(target) if target else None
+            if dest is None and target in pinned and pinned[target].stats is not None:
+                dest = pinned[target]
+            if (
+                dest is None
+                or dest is row
+                or row.stats is None
+                or self._hl.lookup(canonical_key(row.key))
+            ):
+                out.append(row)
+                continue
+            dest.folded.append(row)
+        for dest in [*by_key.values(), *pinned.values()]:
+            if dest.folded and dest.stats is not None:
+                dest.stats = _fold_stats(
+                    dest.stats, [t.stats for t in dest.folded if t.stats]
+                )
+        return out
 
     @staticmethod
     def _group_row(folder: str, members: list[_Row], auto: bool = False) -> _Row:
@@ -1696,7 +1856,7 @@ class FilesPanel(Widget):
     def _group_cell(self, row: _Row) -> Text:
         if row.fold:
             return self._fold_cell(row)
-        shown = (row.group or "") if self._full_paths else app_relative(row.group or "")
+        shown = self._display_path(row.group or "")
         n = len(row.members)
         tail = f" · {n} file{'s' if n != 1 else ''}"
         # Another app's group names its package, like its file rows.
@@ -1730,26 +1890,80 @@ class FilesPanel(Widget):
             return Text("  ").append_text(inner)
         return self._path_cell_inner(row)
 
-    def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
+    def _display_path(self, path: str) -> str:
+        """``path`` as the table shows it: app-relative, a browser profile
+        folder as ``@profile/`` (``.`` full paths: unchanged).
+        """
+        if self._full_paths:
+            return path
+        return short_profile(app_relative(path))
+
+    def _cell_layout(self, row: _Row, indent: int = 0) -> tuple:
+        """``(owner, shown, suffix, width)`` of a file row's path cell:
+        the path before truncation and the cells it may take.
+        """
         act = row.activity
         moved = act.moved_to if act is not None else None
         # "old.txt renamed to new.txt": the renamed-away row says where the
         # file went.
         suffix = f" renamed to {moved.rsplit('/', 1)[-1]}" if moved else ""
-        shown = row.key if self._full_paths else app_relative(row.key)
+        under = None if self._full_paths else row.under
+        if under and row.key.startswith(under + "/"):
+            # Below its open group the folder is on the group row.
+            shown = row.key[len(under) + 1 :]
+        else:
+            shown = self._display_path(row.key)
         # Short paths drop /data/data/<pkg>/: name the package whenever it
         # is not the monitored app's -- always in REVIEW, where a run lists
         # files of several apps (bugle_db must not read as Wikipedia's).
-        owner = None if self._full_paths else self._foreign_package(row)
-        if not self._full_paths:
+        owner = None if self._full_paths or under else self._foreign_package(row)
+        width = self._path_width - len(suffix) - indent
+        if self._full_paths:
+            return owner, shown, suffix, width
+        if suffix and width < 12:
+            suffix = " renamed"
             width = self._path_width - len(suffix) - indent
-            if suffix and width < 12:
-                suffix = " renamed"
-                width = self._path_width - len(suffix)
-            if owner:
-                owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
-                width -= len(owner) + 2
-            shown = smart_truncate(shown, max(4, width))
+        if owner:
+            owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
+            width -= len(owner) + 2
+        return owner, shown, suffix, width
+
+    def _folder_rooms(self, rows: list[_Row]) -> dict[str, int]:
+        """Per shown folder, the cells its path may take so that every
+        sibling row fits: siblings share one truncated prefix
+        (``files/…/k3m7y….default/`` vs ``files/…/k3m7…default/`` was
+        the old per-row result).
+        """
+        rooms: dict[str, int] = {}
+        if self._full_paths:
+            return rooms
+        for row in rows:
+            if row.group is not None or row.depth:
+                continue
+            _owner, shown, _suffix, width = self._cell_layout(row)
+            head, sep, name = shown.rpartition("/")
+            if not sep:
+                continue
+            room = width - len(name) - 1
+            if room >= _MIN_DIR_ROOM:
+                rooms[head] = min(rooms.get(head, room), room)
+        return rooms
+
+    def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
+        act = row.activity
+        moved = act.moved_to if act is not None else None
+        owner, shown, suffix, width = self._cell_layout(row, indent)
+        if not self._full_paths:
+            head, sep, name = shown.rpartition("/")
+            room = self._dir_rooms.get(head) if sep and not row.depth else None
+            if room is not None and len(head) > room:
+                # The folder alone, its last part elided like any folder
+                # (a stand-in name keeps smart_truncate from keeping it whole).
+                cut = smart_truncate(f"{head}/\0", room + 2)
+                cut = cut[:-2] if cut.endswith("/\0") else smart_truncate(head, room)
+                shown = f"{cut}/{name}"
+            elif len(shown) > width:
+                shown = smart_truncate(shown, max(4, width))
         head, sep, name = shown.rpartition("/")
         text = Text(no_wrap=True, overflow="ellipsis")
         if owner:
@@ -1809,7 +2023,7 @@ class FilesPanel(Widget):
         elif row.pattern:
             ops.append("*", style=_c("dim"))
         count = Text(
-            f"{max(0, stats.count - ours)}×" if stats else "",
+            count_text(max(0, stats.count - ours)) if stats else "",
             style=_c("dim"),
             justify="right",
         )
@@ -1871,8 +2085,13 @@ class FilesPanel(Widget):
                 for r in rows
                 if not r.fold
                 and not (r.watched and r.stats is None)
-                and (r.key in new or any(m.key in new for m in r.members))
+                and (
+                    r.key in new
+                    or any(m.key in new for m in r.members)
+                    or any(t.key in new for t in r.folded)
+                )
             )
+        self._dir_rooms = self._folder_rooms(rows)
         with self.app.batch_update():
             table.clear()
             order = ("mark", "path", "ops", "count", "last", "ident", "hl")
@@ -1955,12 +2174,25 @@ class FilesPanel(Widget):
         where = f" in {target}" if target else ""
         return Text(f"Watching for file activity{where} — nothing yet{tail}")
 
+    #: Caption parts by priority (lower: kept longer when the caption is
+    #: cut to the frame width): filters and losses, scope and watches,
+    #: counts, hidden / dropped, key hints.
+    _KEEP, _SCOPE, _COUNT, _HIDDEN, _HINT = range(5)
+
     def caption(self) -> tuple[str, str]:
-        """``(title, info)`` for the lens frame."""
+        """``(title, info)`` for the lens frame.
+
+        The title carries the state and the modes (``live · watched only ·
+        by name · monitor ● on``; no ``live`` while the monitor is off or
+        blind). The info line is short and fitted to the frame: the parts
+        of least priority go first (:meth:`_fit_caption`).
+        """
         rows = self._rows
+        parts: list[tuple[int, str]] = []
         if self.review:
             title = self._review_title()
-            parts = [f"{len(rows)} files"] if self._review_record is not None else []
+            if self._review_record is not None:
+                parts.append((self._COUNT, f"{len(rows)} files"))
         else:
             running, _task = self._monitor_task()
             if self._segment is not None:
@@ -1971,6 +2203,12 @@ class FilesPanel(Widget):
                     if running
                     else f"monitor [{_c('dim')}]○ off[/]"
                 )
+            # Modes are state: in the title, before the monitor's.
+            modes = []
+            if self._watched_only:
+                modes.append("watched only")
+            if self._sort != "recent":
+                modes.append(f"by {self._sort}")
             wl = self._watchlist_or_none()
             n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(
@@ -1982,28 +2220,28 @@ class FilesPanel(Widget):
                 count += f" + {n_patterns} pattern{'s' if n_patterns != 1 else ''}"
             if n_groups:
                 count += f" + {n_groups} group{'s' if n_groups != 1 else ''}"
-            parts = [count]
+            parts.append((self._COUNT, count))
             if wl is not None and wl.summary():
-                parts.append(wl.summary())
-            hidden = self.hidden_summary()
-            if hidden:
-                parts.append(hidden)
-            if self.activity.dropped:
-                parts.append(
-                    f"{self.activity.dropped} dropped at the "
-                    f"{self.activity.max_paths}-row limit"
-                )
-            if self._watched_only:
-                parts.append("watched only · W all")
-            if self._sort != "recent":
-                parts.append(f"by {self._sort}")
-            if self._segment is not None:
-                parts.append("A all · </> notes and sections")
+                parts.append((self._SCOPE, wl.summary()))
             watching = wl is not None and wl.has_watches
             if not running and watching:
-                parts.append("monitor off — watched files not tracked · o starts it")
-            elif watching and not wl._auto_pull_enabled():
-                parts.append("auto-pull off")
+                # The title says "monitor ○ off".
+                parts.append((self._KEEP, "watched files not tracked · o starts"))
+            hidden = self.hidden_summary()
+            if hidden:
+                parts.append((self._HIDDEN, hidden))
+            if self.activity.dropped:
+                parts.append(
+                    (
+                        self._HIDDEN,
+                        f"{self.activity.dropped} dropped "
+                        f"(cap {self.activity.max_paths})",
+                    )
+                )
+            if self._segment is not None:
+                parts.append((self._HINT, "A all · </> notes and sections"))
+            if running and watching and not wl._auto_pull_enabled():
+                parts.append((self._COUNT, "auto-pull off"))
             if (
                 not rows
                 and not self._filter
@@ -2014,6 +2252,7 @@ class FilesPanel(Widget):
             # What the monitor records: scope, following, lost events, how to
             # stop -- and "blind" instead of LIVE once it records nothing.
             watch = self._monitor_watch() if running else None
+            blind = None
             if watch is not None:
                 try:
                     blind, status = watch.caption()
@@ -2021,30 +2260,66 @@ class FilesPanel(Widget):
                     blind, status = None, []
                 if blind:
                     if self._segment is not None:
-                        parts.insert(0, title)
+                        parts.insert(0, (self._SCOPE, title))
                     title = blind
-                parts = list(status) + parts
-            if self.follow_applies and rows:
+                parts = [(self._status_priority(p), p) for p in status] + parts
+            if modes:
+                title = f"{' · '.join(modes)} · {title}"
+            # A stopped or blind monitor records nothing: no "live" then
+            # (the title said "live · monitor ○ off"); scrolled back stays.
+            quiet = not running or bool(blind)
+            if self.follow_applies and rows and not (quiet and self._follow.live):
                 # Follow state: in ONE place, the title (as in every lens).
                 title = f"{self._follow.text} · {title}"
         if self._filter:
-            parts.insert(0, f"/{escape_markup(self._filter)}")
+            parts.insert(0, (self._KEEP, f"/{escape_markup(self._filter)}"))
         ai = self._hl.caption_count(self._hl.view_shown, self._hl.view_total)
         if ai is not None:
             # The frame caption is markup; the label is chat agent text.
-            parts.insert(0, escape_markup(ai))
-        return title, " · ".join(parts)
+            parts.insert(0, (self._KEEP, escape_markup(ai)))
+        return title, self._fit_caption(parts)
+
+    def _status_priority(self, part: str) -> int:
+        """A ``MonitorWatch.caption`` part's priority: losses stay, the
+        scope next, the stop hint goes first.
+        """
+        if "lost" in part or part.startswith("o stops ·"):
+            return self._KEEP  # blind: "o stops · o again re-targets" stays
+        if part == "o stops":
+            return self._HINT
+        return self._SCOPE
+
+    def _fit_caption(self, parts: list[tuple[int, str]]) -> str:
+        """The parts joined with `` · ``, the least important ones left out
+        until the line fits the frame (the frame cut it mid-word before:
+        at 120 columns, or with the Inspector open).
+        """
+        width = self.size.width
+        budget = width - 4 if width else 0
+        keep = list(parts)
+
+        def plain(items) -> str:
+            return " · ".join(text for _p, text in items)
+
+        def cells(items) -> int:
+            try:
+                return Text.from_markup(plain(items)).cell_len
+            except Exception:
+                return len(plain(items))
+
+        while budget and len(keep) > 1 and cells(keep) > budget:
+            worst = max(p for p, _t in keep)
+            if worst == self._KEEP:
+                break
+            index = max(i for i, (p, _t) in enumerate(keep) if p == worst)
+            del keep[index]
+        return plain(keep)
 
     def hidden_summary(self) -> str:
-        """``"14 hidden: prefix 12 · open-only 2"`` (empty when none)."""
+        """``"14 hidden"`` (empty when none; ``R`` lists the rules)."""
         if self.activity.show_all or not self._hidden:
             return ""
-        total = sum(self._hidden.values())
-        kinds = " · ".join(
-            f"{kind} {n}"
-            for kind, n in sorted(self._hidden.items(), key=lambda kv: -kv[1])
-        )
-        return f"{total} hidden: {kinds} (N shows)"
+        return f"{sum(self._hidden.values())} hidden"
 
     def _hidden_count(self) -> int:
         """Rows hidden by a rule in the last redraw (0 while showing all)."""
@@ -2649,9 +2924,13 @@ class FilesPanel(Widget):
                 top = sorted(procs.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
             if act.moved_to:
-                grid.add_row("now", Text(f"renamed to {app_relative(act.moved_to)}"))
+                grid.add_row(
+                    "now", SlashWrap(f"renamed to {app_relative(act.moved_to)}")
+                )
             elif act.deleted:
                 grid.add_row("now", Text("deleted", style=op_color("delete")))
+            for temp in row.folded:
+                grid.add_row("temp file", self._temp_text(temp))
         else:
             grid.add_row("activity", Text("none seen yet", style=_c("dim")))
         sections: list = [("", grid)]
@@ -2673,6 +2952,23 @@ class FilesPanel(Widget):
                 pull.add_row("", Text(info.detail, style=_c("dim")))
             sections.append(("Last pull", pull))
         return sections
+
+    @staticmethod
+    def _temp_text(temp: _Row) -> Text:
+        """An atomic write's temp file folded into this row: its name, its
+        own ops and "renamed to this file" (its row is not in the table).
+        """
+        text = Text(temp.key.rpartition("/")[2])
+        stats = temp.activity.stats(None) if temp.activity is not None else None
+        if stats is not None:
+            for cat, (letter, _color) in OPS.items():
+                n = stats.ops.get(cat, 0)
+                if n > 0 and cat not in ("rename", "noise"):
+                    text.append("  ")
+                    text.append(letter, style=op_color(cat))
+                    text.append(f" {n}×")
+        text.append("  renamed to this file", style=_c("dim"))
+        return text
 
     @staticmethod
     def _clock_text(sample: dict | None) -> Text | None:
@@ -2732,36 +3028,61 @@ class FilesPanel(Widget):
             and (start is None or m.when >= start)
         ][: self._MAX_OLDER_NOTES]
         pending = [m for m in pending if m.when >= oldest] + notes + older[:1]
+        kept = len(act.events)
+        if act.count > kept:
+            # Only the newest EVENTS_PER_PATH are kept per file: say so.
+            out.append(f"last {kept} of {act.count:,} events", style=_c("dim"))
+        # Identical consecutive events (the same op, companion, process and
+        # other side; times differ) are one line with a count, newest time.
+        run: list = []
+
+        def flush() -> None:
+            if run:
+                self._event_line(out, run[0], len(run))
+                run.clear()
+
         for ev in reversed(act.events):
-            while pending and pending[0].when > ev.when:
-                mark = pending.pop(0)
-                if out:
-                    out.append("\n")
-                out.append(mark.text, style=_SEP_STYLE[mark.kind]())
-            if out:
-                out.append("\n")
-            out.append(_fmt_time(ev.when), style=_c("dim"))
-            out.append("  ")
-            out.append(
-                f"{ev.label or '?':<7}", style=op_color(ev.category) or ev.color or ""
-            )
-            extra = []
-            if ev.via:
-                extra.append(ev.via)
-            if ev.source == "renamed" and ev.other:
-                extra.append(f"to {app_relative(ev.other)}")
-            elif ev.source == "parent" and ev.other:
-                extra.append(f"directory {app_relative(ev.other)} deleted")
-            elif ev.other:
-                extra.append(f"from {app_relative(ev.other)}")
-            if ev.process:
-                extra.append(ev.process)
-            if extra:
-                out.append("  " + " · ".join(extra), style=_c("dim"))
+            if pending and pending[0].when > ev.when:
+                flush()
+                while pending and pending[0].when > ev.when:
+                    mark = pending.pop(0)
+                    if out:
+                        out.append("\n")
+                    out.append(mark.text, style=_SEP_STYLE[mark.kind]())
+            elif run and _event_kind(run[0]) != _event_kind(ev):
+                flush()
+            run.append(ev)
+        flush()
         for mark in pending:
             out.append("\n")
             out.append(mark.text, style=_SEP_STYLE[mark.kind]())
         return out
+
+    @staticmethod
+    def _event_line(out: Text, ev, n: int = 1) -> None:
+        """One Events line (``n`` > 1: a run of identical events)."""
+        if out:
+            out.append("\n")
+        out.append(_fmt_time(ev.when), style=_c("dim"))
+        out.append("  ")
+        out.append(
+            f"{ev.label or '?':<7}", style=op_color(ev.category) or ev.color or ""
+        )
+        extra = []
+        if ev.via:
+            extra.append(ev.via)
+        if ev.source == "renamed" and ev.other:
+            extra.append(f"to {app_relative(ev.other)}")
+        elif ev.source == "parent" and ev.other:
+            extra.append(f"directory {app_relative(ev.other)} deleted")
+        elif ev.other:
+            extra.append(f"from {app_relative(ev.other)}")
+        if ev.process:
+            extra.append(ev.process)
+        if extra:
+            out.append("  " + " · ".join(extra), style=_c("dim"))
+        if n > 1:
+            out.append(f"  ×{n}", style=_c("muted"))
 
     #: Restart/exit/loss lines shown before a file's first event (newest).
     _MAX_OLDER_NOTES = 5
@@ -2992,7 +3313,8 @@ class FilesPanel(Widget):
         wl = self.watchlist
         if row.watched is not None and row.watched != row.key and not row.pattern:
             self.app.notify(
-                f"Watched via {row.watched} — unwatch that row.", severity="warning"
+                toast_paths(self.app, f"Watched via {row.watched} — unwatch that row."),
+                severity="warning",
             )
             return
         if row.watched is not None:
@@ -3031,7 +3353,9 @@ class FilesPanel(Widget):
                 if act.moved_to
                 else "deleted on the device"
             )
-            self.app.notify(f"Nothing to pull: {what}.", severity="warning")
+            self.app.notify(
+                toast_paths(self.app, f"Nothing to pull: {what}."), severity="warning"
+            )
             return
         if row.watched is None:
             path = self._absolute(row.key)
@@ -3182,7 +3506,11 @@ class FilesPanel(Widget):
             )
             return
         how = "saved" if always else "this session"
-        self.app.notify(f"Hidden: {shown} ({how}; R undoes)", timeout=4, markup=False)
+        self.app.notify(
+            toast_paths(self.app, f"Hidden: {shown} ({how}; R undoes)"),
+            timeout=4,
+            markup=False,
+        )
 
     def action_toggle_watched_only(self) -> None:
         """``W``: watched files only ↔ all rows."""
