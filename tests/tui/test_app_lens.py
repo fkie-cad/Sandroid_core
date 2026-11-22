@@ -1432,6 +1432,27 @@ async def test_caption_offers_space_only_when_it_does_something(fake, monkeypatc
         assert caption().endswith("· Space resumes")
 
 
+@pytest.mark.parametrize("size", [(100, 30), (200, 50)])
+async def test_header_does_not_repeat_the_hooks_and_bypass_rows(fake, size):
+    """The header line says state, PID and app; hooks and bypass have their
+    own rows below it. "experimental" is said once, not "(exp.)" six times.
+    """
+    app = _app()
+    async with app.run_test(size=size) as pilot:
+        ms = await boot(app, pilot)
+        await until(pilot, lambda: _loaded(_sections(ms)))
+        await settle(pilot)
+        text = _screen_text(app)
+        head = next(line for line in text.splitlines() if "pid 4242" in line)
+        assert PKG in head
+        assert "hooks:" not in head
+        assert "bypass:" not in head
+        assert "(exp.)" not in text
+        assert text.count("experimental") == 1
+        bypass = next(line for line in text.splitlines() if "1 SSL" in line)
+        assert "6 Emulator" in bypass  # one line at 100 columns too
+
+
 async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
     """100x30 with the Inspector open: the lens is ~44 columns wide."""
     app = _app()
@@ -1442,7 +1463,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         await settle(pilot)
         wide = _screen_text(app)
         assert "Shift+K kill" in wide
-        assert "1 SSL (exp.)" in wide  # the full toggle row fits
+        assert "1 SSL   2 Root" in wide  # the full toggle row fits
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
         await settle(pilot)
@@ -1451,7 +1472,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         assert panel.size.width < 60
         text = _screen_text(app)
         assert "b bypass: none" in text
-        assert "1 SSL (exp.)" not in text
+        assert "1 SSL" not in text
         actions = next(line for line in text.splitlines() if "Shift+" in line)
         assert "Shift+ R A P K X" in " ".join(actions.split())
         ms.close_inspector()

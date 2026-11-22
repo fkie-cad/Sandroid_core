@@ -56,9 +56,9 @@ logger = logging.getLogger(__name__)
 
 # (chord digit, category, label) for the immediate bypass toggles: ``b`` then
 # the digit (BypassChordModal). Built from the one digit table the Objection
-# modal uses too (``BYPASS_KEYS``). All bypass tiers are experimental, hence
-# the "(exp.)" tag.
-_BYPASS_TOGGLES = [(key, cat, f"{label} (exp.)") for key, cat, label in BYPASS_KEYS]
+# modal uses too (``BYPASS_KEYS``). All bypass tiers are experimental: the
+# hint after the toggles says so once (not "(exp.)" after each of the six).
+_BYPASS_TOGGLES = list(BYPASS_KEYS)
 
 # Clickable action-cell id -> panel action method. Routed from
 # MainScreen.on_click (same dispatch as the bottom tab bar / arrow).
@@ -871,8 +871,6 @@ class SpotlightPanel(Widget):
 
         pid = self._safe_pid()
         paused = self._is_paused()
-        hooks = self._hooks_for_app(package)
-        on = self._on_categories()
 
         from sandroid.services.app_start import pre_start_status
 
@@ -892,10 +890,10 @@ class SpotlightPanel(Widget):
         else:
             state = f"[{c.dim}]○ not running[/]  [{c.dim}]Space starts[/]"
 
-        bypass_tag = (
-            f"[{c.ok}]bypass: {', '.join(on)}[/]" if on else f"[{c.dim}]bypass: none[/]"
-        )
-        header = f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
+        # The hooks and the bypass toggles have their own rows right below:
+        # the header names the state and the app only (no "hooks: 0  bypass:
+        # none" repeating them).
+        header = f"{state}  [b]{package}[/]"
         others = sum(1 for a in collect_app_hooks() if a.package != package)
         if others:
             header += f"  [{c.dim}]{others_note(others)}[/]"
@@ -966,7 +964,8 @@ class SpotlightPanel(Widget):
             lines.append(
                 row(
                     "b bypass:",
-                    f"{state} [{c.dim}](b then 1-{len(_BYPASS_TOGGLES)})[/]",
+                    f"{state} [{c.dim}](b then 1-{len(_BYPASS_TOGGLES)}, "
+                    "experimental)[/]",
                     " ",
                 )
             )
@@ -983,19 +982,27 @@ class SpotlightPanel(Widget):
             color = c.ok if category in on else c.dim
             plain = f"{key} {label}"
             cells.append((len(plain), f"[{color}][b]{key}[/] {label}[/]"))
-        hint = f"b then 1-{len(_BYPASS_TOGGLES)}, armed ones apply on Start"
-        cells.append((len(hint), f"[{c.dim}]{hint}[/]"))
         rows: list[list[str]] = [[]]
         used = 0
-        for index, (length, markup) in enumerate(cells):
+        for length, markup in cells:
             extra = length + (len(gap) if rows[-1] else 0)
             if rows[-1] and used + extra > room:
-                if index == len(cells) - 1:
-                    break  # the hint only goes where it fits
                 rows.append([])
                 used, extra = 0, length
             rows[-1].append(markup)
             used += extra
+        # The hint follows the toggles in the longest form that fits (said
+        # once for all six, not "(exp.)" after each). Never a row of its own:
+        # a taller body can bring a scrollbar, which makes the lens narrow.
+        n = len(_BYPASS_TOGGLES)
+        for hint in (
+            f"b then 1-{n} · experimental · armed ones apply on Start",
+            f"b then 1-{n} · experimental",
+            "experimental",
+        ):
+            if used + len(gap) + len(hint) <= room:
+                rows[-1].append(f"[{c.dim}]{hint}[/]")
+                break
         lines.append(row("bypass", gap.join(rows[0])))
         lines += [" " * (width + 3) + gap.join(r) for r in rows[1:]]
         if identity:
