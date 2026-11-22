@@ -123,8 +123,8 @@ LENS_MIN_ROWS = 6
 CHAT_SPLIT_MIN_HEIGHT = CHAT_MIN_ROWS + LENS_MIN_ROWS
 #: Below this screen width the screen gets ``-narrow`` (narrower Inspector).
 NARROW_WIDTH = 120
-#: Dock frame title (the "Blockhead" antennae + name).
-CHAT_TITLE = "▚▄▄▞ Sandroid AI"
+#: Dock frame title: the name only (the mascot itself shows once, inside).
+CHAT_TITLE = "Sandroid AI"
 
 
 def chat_rows(height: int, ratio: float) -> int:
@@ -1292,7 +1292,7 @@ class MainScreen(Screen):
         if self._chat_mode == "max":
             return key_words("max · ⇧↓ restore · ^Y close")
         if self._chat_too_short():
-            return "small window · ^Y close"
+            return key_words("small window · ^Y close")
         return key_words(f"{round(self._chat_ratio * 100)}% · ⇧↑/↓ size · ^Y close")
 
     def open_chat(self, focus: bool = True, *, split: bool = False) -> None:

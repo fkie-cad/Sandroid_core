@@ -58,6 +58,8 @@ HEADER_COMPACT_WIDTH = 60
 ARGS_COMPACT_WIDTH = 80
 #: Longest single argument value shown (cells) before "…".
 ARG_VALUE_MAX = 40
+#: Fewest cells left for the args on a tool call's line (less: no args).
+TOOL_ARGS_MIN = 8
 #: Most blocks kept mounted in a :class:`ChatTranscript`.
 MAX_BLOCKS = 300
 
@@ -241,7 +243,7 @@ def format_header(
     if remote:
         markers += [" ", ("REMOTE", "bold $lens-warn")]
     if experimental:
-        markers += [" ", ("EXPERIMENTAL", "$lens-warn")]
+        markers += [" ", ("EXPERIMENTAL", "$chat-muted")]
     tail = Content.assemble(*markers)
 
     def right_side(compact: bool) -> Content:
@@ -347,7 +349,8 @@ def format_args(
     """Tool arguments: ``package="com.example"  since="launch"``.
 
     ``compact`` drops the quotes (``package=com.example``); ``None`` values
-    are left out; ``max_width`` cuts the whole line with "…".
+    are left out; ``max_width`` cuts the whole line with "…". Secondary
+    text: keys in ``$chat-muted``, values in ``$lens-muted``.
     """
     parts: list[str | tuple[str, str]] = []
     for key, value in (args or {}).items():
@@ -355,7 +358,10 @@ def format_args(
             continue
         if parts:
             parts.append("  ")
-        parts += [(f"{key}=", "$chat-muted"), _arg_value(value, quote=not compact)]
+        parts += [
+            (f"{key}=", "$chat-muted"),
+            (_arg_value(value, quote=not compact), "$lens-muted"),
+        ]
     content = Content.assemble(*parts)
     if max_width is not None and content.cell_length > max_width:
         content = content.truncate(max(1, max_width), ellipsis=True)
@@ -373,8 +379,9 @@ def format_chip(
 ) -> Content:
     """A tool result chip: ``done · R17 · 12 rows · 0.4s`` / ``code: message``.
 
-    The first word says how the call ended, in its colour: ``done`` (ok),
-    the error code (``denied`` / ``cancelled`` warn, others bad; a plain
+    The first word says how the call ended: ``done`` in the muted colour
+    (success is the normal case, so it carries no colour), the error code
+    in its colour (``denied`` / ``cancelled`` warn, others bad; a plain
     tool failure reads ``failed``).
     """
     if not ok:
@@ -387,7 +394,7 @@ def format_chip(
             parts.append((f" · {format_elapsed(elapsed)}", "$chat-muted"))
         return Content.assemble(*parts)
     bits = [b for b in (ref, summary, format_elapsed(elapsed)) if b]
-    parts = [("done", "$lens-ok")]
+    parts = [("done", "$chat-muted")]
     for bit in bits:
         parts.append((" · ", "$chat-muted"))
         parts.append((bit, "bold $lens-accent" if bit == ref else "$chat-muted"))
@@ -519,6 +526,9 @@ MASCOT_TRAY = {"blocks": "╘═══════╛", "ascii": "`-------'"}
 MASCOT_INTERVAL = {"idle": 0.5, "thinking": 0.35, "streaming": 0.3}
 #: Narrower than this (cells), the mascot hides.
 MASCOT_MIN_WIDTH = 50
+#: Narrower than this (cells), the live mascot beside the input hides: in a
+#: narrow dock the input needs the room (and its key hints) more.
+INPUT_MASCOT_MIN_WIDTH = 72
 #: ``TERM`` values that get the ASCII mascot under ``auto``.
 ASCII_TERMS = frozenset({"linux", "vt100", "dumb"})
 
@@ -587,7 +597,9 @@ class ChatMascot(Static):
     blink, thinking eye-scan, streaming antennae); tool, approval and error
     are still frames. ``style`` is ``blocks``, ``ascii``, ``off`` or None
     (the configured ``ai.chat_mascot``). Hidden below
-    :data:`MASCOT_MIN_WIDTH` cells (:meth:`fit_width`).
+    :data:`INPUT_MASCOT_MIN_WIDTH` cells (:meth:`fit_width`) and while
+    :meth:`set_suppressed` says another mascot is on screen (the empty
+    state's), so the mascot never shows twice.
     """
 
     DEFAULT_CSS = """
@@ -622,6 +634,7 @@ class ChatMascot(Static):
         self._frame = 0
         self._timer = None
         self._fits = True
+        self._suppressed = False
 
     @property
     def state(self) -> str:
@@ -663,14 +676,22 @@ class ChatMascot(Static):
         self._apply()
 
     def fit_width(self, width: int) -> None:
-        """Hide the mascot when the row it sits in is narrower than 50 cells."""
-        self._fits = width >= MASCOT_MIN_WIDTH
+        """Hide the mascot when the row it sits in is narrower than 72 cells."""
+        self._fits = width >= INPUT_MASCOT_MIN_WIDTH
+        self._apply()
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide the mascot while another one is on screen (the empty state)."""
+        if suppressed == self._suppressed:
+            return
+        self._suppressed = suppressed
         self._apply()
 
     def _wants_timer(self) -> bool:
         return (
             self.style_name != "off"
             and self._fits
+            and not self._suppressed
             and len(self.frames()) > 1
             and self._state in MASCOT_INTERVAL
         )
@@ -678,7 +699,7 @@ class ChatMascot(Static):
     def _apply(self) -> None:
         for state in MASCOT_STATES:
             self.set_class(state == self._state, f"-{state}")
-        visible = self.style_name != "off" and self._fits
+        visible = self.style_name != "off" and self._fits and not self._suppressed
         self.display = visible
         if self._timer is not None:
             self._timer.stop()
@@ -786,7 +807,10 @@ class TranscriptBlock:
 
 
 class UserBlock(Static, TranscriptBlock):
-    """The user's message: a full-width band (``$chat-user-band``)."""
+    """The user's message: a full-width band (``$chat-user-band``) with an
+    accent bar on its left edge -- the transcript's one speaker marker
+    (everything between two user bands is the assistant's).
+    """
 
     DEFAULT_CSS = """
     UserBlock {
@@ -794,14 +818,15 @@ class UserBlock(Static, TranscriptBlock):
         height: auto;
         margin: 1 0 1 0;
         padding: 0 1;
+        border-left: outer $lens-accent;
         background: $chat-user-band;
-        color: $text;
+        color: $lens-text;
     }
     """
 
     def __init__(self, text: str, **kwargs: Any) -> None:
         self.text = text
-        super().__init__(Content.assemble(("› ", "bold $chat-muted"), text), **kwargs)
+        super().__init__(Content(text), **kwargs)
 
 
 class ReplyBlock(Markdown, TranscriptBlock):
@@ -816,13 +841,46 @@ class ReplyBlock(Markdown, TranscriptBlock):
     ReplyBlock {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 2;
         margin: 1 0 1 0;
-        color: $chat-reply;
+        color: $lens-text;
         background: transparent;
     }
     ReplyBlock > MarkdownParagraph:last-child {
         margin: 0;
+    }
+    ReplyBlock MarkdownH1, ReplyBlock MarkdownH2, ReplyBlock MarkdownH3 {
+        content-align: left top;
+        width: 1fr;
+        margin: 1 0 1 0;
+        color: $lens-title;
+        background: transparent;
+        text-style: bold;
+    }
+    ReplyBlock MarkdownH4, ReplyBlock MarkdownH5, ReplyBlock MarkdownH6 {
+        margin: 1 0 0 0;
+        color: $lens-text;
+        background: transparent;
+        text-style: bold;
+    }
+    ReplyBlock MarkdownBullet {
+        color: $lens-dim;
+    }
+    ReplyBlock MarkdownBlock:dark > .code_inline,
+    ReplyBlock MarkdownBlock:light > .code_inline {
+        background: $lens-band;
+        color: $lens-title;
+    }
+    ReplyBlock MarkdownFence, ReplyBlock MarkdownFence:light {
+        background: $lens-band;
+    }
+    ReplyBlock MarkdownFence > Label {
+        padding: 0 1;
+    }
+    ReplyBlock MarkdownBlockQuote {
+        background: transparent;
+        border-left: outer $lens-rule;
+        color: $lens-muted;
     }
     """
 
@@ -865,7 +923,7 @@ class ReasoningLine(Static, TranscriptBlock):
     ReasoningLine {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 2;
         color: $chat-muted;
         text-style: italic;
     }
@@ -919,23 +977,32 @@ class ReasoningLine(Static, TranscriptBlock):
 
 
 class ToolBlock(Widget, TranscriptBlock):
-    """One tool call: ``Name args`` and, once done, its result chip.
+    """One tool call on one line: ``● Name  args   status``.
 
-    The name is in the tool colour (bad once the call failed); the line
-    under it reads ``running`` until progress or the chip replaces it.
-    :meth:`set_result` /
-    :meth:`set_error` / :meth:`set_chip` fill the chip line in place.
-    Narrower than :data:`ARGS_COMPACT_WIDTH` cells, string args lose their
-    quotes; every line is cut with "…" at the block's width.
+    The two-cell gutter holds the call's dot while it runs (``●``, accent)
+    or waits for the analyst (``◌``, wait colour); a finished call has none.
+    The name is bold text and the args are muted. The status after them is
+    ``running``, the live progress, ``waiting on you`` or, once the call is
+    done, its result chip (the approval answer in front of it). When the
+    line is too narrow the args give way first (string args lose their
+    quotes below :data:`ARGS_COMPACT_WIDTH` cells), then the line is cut
+    with "…". A click toggles :attr:`expanded`: every argument in full,
+    one per line, and the whole status under the call.
+    :meth:`set_result` / :meth:`set_error` / :meth:`set_chip` fill the
+    status in place.
     """
 
     DEFAULT_CSS = """
     ToolBlock {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 0;
+        color: $lens-text;
         text-wrap: nowrap;
         text-overflow: ellipsis;
+    }
+    ToolBlock:hover {
+        background: $lens-cursor;
     }
     """
 
@@ -956,14 +1023,18 @@ class ToolBlock(Widget, TranscriptBlock):
         self.label = label or humanize_tool_name(name)
         self.chip: Content | None = None
         self.ok: bool | None = None
-        #: The analyst's answer to this call's approval (shown above the chip).
+        #: The analyst's answer to this call's approval (shown before the chip).
         self.decision: Content | None = None
         self.decision_approved: bool | None = None
-        #: Seconds the failed call took (the declined line shows them).
+        #: Seconds the failed call took (the declined status shows them).
         self.elapsed: float | None = None
         #: Live progress of a long call (``classifying 120/412 · 9 matched``),
         #: shown while it runs; replaced by the chip.
         self.progress: Content | None = None
+        #: An approval card for this call waits for the analyst.
+        self.awaiting = False
+        #: Every argument shown in full under the call (a click toggles it).
+        self.expanded = False
         self.running = running
 
     def _stop(self) -> None:
@@ -972,7 +1043,7 @@ class ToolBlock(Widget, TranscriptBlock):
     def set_args(self, args: Mapping[str, Any]) -> None:
         """Replace the shown arguments (e.g. once they finished streaming)."""
         self.args = dict(args)
-        self.refresh()
+        self.refresh(layout=self.expanded)
 
     def set_result(
         self,
@@ -999,19 +1070,26 @@ class ToolBlock(Widget, TranscriptBlock):
             format_chip(ok=False, code=code, message=message, elapsed=elapsed), ok=False
         )
 
+    def set_awaiting(self, awaiting: bool = True) -> None:
+        """An approval card for this call waits (``◌ … waiting on you``)."""
+        self.awaiting = awaiting
+        self.refresh()
+
     def set_decision(
         self, text: str, *, style: str = "$chat-muted", approved: bool = True
     ) -> None:
-        """Show the approval answer (``allowed by you``) under the call."""
+        """Show the approval answer (``allowed by you``) on the call."""
         self.decision = Content.styled(text, style)
         self.decision_approved = approved
+        self.awaiting = False
         self.refresh(layout=True)
 
     def set_chip(self, chip: Content | str, *, ok: bool | None = True) -> None:
-        """Any chip line (e.g. ``r2 running · see agents bar``)."""
+        """Any status chip (e.g. ``r2 running · see agents bar``)."""
         self.chip = chip if isinstance(chip, Content) else Content(chip)
         self.ok = ok
         self.progress = None
+        self.awaiting = False
         self._stop()
         self.refresh(layout=True)
 
@@ -1022,23 +1100,12 @@ class ToolBlock(Widget, TranscriptBlock):
         """
         if self.chip is not None or not text:
             return
-        line = format_progress(text)
-        grew = self.progress is None
-        self.progress = line
-        self.refresh(layout=grew)
-
-    def call_line(self, width: int | None = None) -> Content:
-        width = width or self.content_size.width or 100
-        style = "bold $lens-bad" if self.ok is False else "bold $chat-tool"
-        args = format_args(self.args, compact=width < ARGS_COMPACT_WIDTH)
-        parts: list[Any] = [(self.label, style)]
-        if args.cell_length:
-            parts += ["  ", args]
-        return Content.assemble(*parts)
+        self.progress = format_progress(text)
+        self.refresh()
 
     def _declined(self) -> bool:
-        """Declined by the analyst and failed: the decision line says it all
-        (``declined by you · note · 50s``), no second ``denied`` chip line.
+        """Declined by the analyst and failed: the decision says it all
+        (``declined by you · note · 50s``), no second ``denied`` chip.
         """
         return (
             self.decision is not None
@@ -1046,30 +1113,98 @@ class ToolBlock(Widget, TranscriptBlock):
             and self.ok is False
         )
 
+    def gutter(self) -> Content:
+        """``● `` running, ``◌ `` waiting on the analyst, blank once finished."""
+        if self.chip is None and self.awaiting:
+            return Content.styled("◌ ", "$chat-wait")
+        if self.chip is None and self.running:
+            return Content.styled("● ", "$lens-accent")
+        return Content("  ")
+
+    def status(self) -> Content:
+        """What the call is doing or how it ended (``""`` if unknown)."""
+        parts: list[Any] = []
+        if self.decision is not None:
+            parts.append(self.decision)
+            if self._declined():
+                if self.elapsed is not None:
+                    parts.append((f" · {format_elapsed(self.elapsed)}", "$chat-muted"))
+                return Content.assemble(*parts)
+        if self.chip is not None:
+            now: Content | None = self.chip
+        elif self.awaiting:
+            now = Content.styled("waiting on you", "$chat-wait")
+        elif self.progress is not None:
+            now = self.progress
+        elif self.running:
+            now = Content.styled("running", "$chat-muted")
+        else:
+            now = None
+        if now is not None:
+            if parts:
+                parts.append((" · ", "$chat-muted"))
+            parts.append(now)
+        return Content.assemble(*parts)
+
+    def call_line(self, width: int | None = None) -> Content:
+        """The call's one line, ``width`` cells at most."""
+        width = width or self.content_size.width or 100
+        head = Content.assemble(self.gutter(), (self.label, "bold"))
+        status = self.status()
+        args = format_args(self.args, compact=width < ARGS_COMPACT_WIDTH)
+        tail = status.cell_length + 3 if status.cell_length else 0
+        room = width - head.cell_length - tail - 2
+        parts: list[Any] = [head]
+        if args.cell_length and room >= TOOL_ARGS_MIN:
+            if args.cell_length > room:
+                args = args.truncate(room, ellipsis=True)
+            parts += ["  ", args]
+        if status.cell_length:
+            parts += ["   ", status]
+        line = Content.assemble(*parts)
+        if line.cell_length > width:
+            line = line.truncate(max(1, width), ellipsis=True)
+        return line
+
+    def detail_lines(self) -> list[Content]:
+        """The expanded view: each argument in full, then the whole status."""
+        lines: list[Content] = []
+        for key, value in self.args.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                text = value
+            else:
+                try:
+                    text = json.dumps(value, ensure_ascii=False, default=str)
+                except Exception:
+                    text = str(value)
+            lines.append(
+                Content.assemble(
+                    "    ",
+                    (f"{key} ", "$chat-muted"),
+                    (text.replace("\n", " "), "$lens-muted"),
+                )
+            )
+        if not lines:
+            lines.append(Content.styled("    no arguments", "$chat-muted"))
+        status = self.status()
+        if status.cell_length:
+            lines.append(Content.assemble("    ", status))
+        return lines
+
+    def on_click(self) -> None:
+        self.expanded = not self.expanded
+        self.refresh(layout=True)
+
     def render(self) -> Content:
         lines = [self.call_line()]
-        declined = self._declined()
-        if self.decision is not None:
-            parts: list[Any] = ["  ", self.decision]
-            if declined and self.elapsed is not None:
-                parts.append((f" · {format_elapsed(self.elapsed)}", "$chat-muted"))
-            lines.append(Content.assemble(*parts))
-        if self.chip is not None and not declined:
-            lines.append(Content.assemble("  ", self.chip))
-        elif self.progress is not None:
-            lines.append(Content.assemble("  ", self.progress))
-        elif self.running:
-            lines.append(Content.assemble("  ", ("● running", "$lens-accent")))
+        if self.expanded:
+            lines += self.detail_lines()
         return Content("\n").join(lines)
 
     def get_content_height(self, container, viewport, width: int) -> int:
-        if self._declined():
-            return 2
-        return (
-            1
-            + (self.decision is not None)
-            + (self.chip is not None or self.progress is not None or bool(self.running))
-        )
+        return 1 + (len(self.detail_lines()) if self.expanded else 0)
 
 
 class AgentCard(Widget, TranscriptBlock, can_focus=True):
@@ -1208,22 +1343,32 @@ class CompactionRule(Static, TranscriptBlock):
 
 
 class NoticeLine(Static, TranscriptBlock):
-    """A one-line notice updated in place (``Retrying in 4s · attempt 2/5``)."""
+    """A one-line notice updated in place (``Retrying in 4s · attempt 2/5``).
+
+    With ``head`` (``"Error:"``) only that leading word is in ``style``
+    and the rest of the text is plain (a failure reads as a red word).
+    """
 
     DEFAULT_CSS = """
     NoticeLine {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 2;
     }
     """
 
     def __init__(
-        self, text: str = "", *, style: str = "$lens-warn", **kwargs: Any
+        self,
+        text: str = "",
+        *,
+        style: str = "$lens-warn",
+        head: str | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__("", **kwargs)
         self.text = text
         self.notice_style = style
+        self.head = head
         self._sync()
 
     def set_notice(self, text: str, *, style: str | None = None) -> None:
@@ -1234,6 +1379,13 @@ class NoticeLine(Static, TranscriptBlock):
         self._sync()
 
     def _sync(self) -> None:
+        head = self.head
+        if head and self.text.startswith(head):
+            rest = self.text[len(head) :]
+            self.update(
+                Content.assemble((head, self.notice_style), (rest, "$lens-text"))
+            )
+            return
         self.update(Content.styled(self.text, self.notice_style))
 
 
@@ -1249,7 +1401,7 @@ class BudgetNotice(Horizontal, TranscriptBlock):
     BudgetNotice {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 1 0 2;
     }
     BudgetNotice > #budget-text {
         width: 1fr;
@@ -1330,7 +1482,7 @@ class FoldMarker(Static):
     FoldMarker {
         width: 1fr;
         height: 1;
-        padding: 0 1;
+        padding: 0 1 0 2;
         color: $chat-muted;
     }
     FoldMarker:hover {
@@ -1522,43 +1674,57 @@ def format_empty_state(
     examples: Iterable[str] = EXAMPLE_PROMPTS,
     mascot_style: str = "blocks",
 ) -> Content:
-    """The empty transcript: mascot in its tray, model, egress, examples."""
+    """The empty transcript: mascot in its tray, model, egress, examples.
 
-    def center(text: str, style: str = "") -> Content:
-        pad = max(0, (width - cell_len(text)) // 2)
-        return Content.assemble(" " * pad, (text, style))
+    The mascot is the one brand mark (the input's live mascot is hidden
+    while this shows); with the mascot off, ``Sandroid AI`` stands in its
+    place. ``experimental`` adds a muted ``experimental`` to the model
+    line (the header and the banner carry the marker in full).
+    """
+
+    def center(*parts: str | tuple[str, str]) -> Content:
+        line = Content.assemble(*parts)
+        pad = max(0, (width - line.cell_length) // 2)
+        return Content.assemble(" " * pad, line)
 
     lines: list[Content] = [Content("")]
     if mascot_style != "off":
         head = mascot_frames("idle", mascot_style)[0]
         for row in (*head, MASCOT_TRAY.get(mascot_style, MASCOT_TRAY["blocks"])):
-            lines.append(center(row, "$chat-brand"))
-        lines.append(Content(""))
-    title = "Sandroid AI · experimental" if experimental else "Sandroid AI"
-    lines.append(center(title, "bold $lens-accent"))
-    target = " @ ".join(p for p in (model, endpoint) if p)
+            lines.append(center((row, "$chat-brand")))
+    else:
+        lines.append(center(("Sandroid AI", "bold $lens-text")))
+    target: list[str | tuple[str, str]] = []
+    shown = " @ ".join(p for p in (model, endpoint) if p)
+    if shown:
+        target.append((shown, "$chat-muted"))
     if remote:
-        target = f"{target} · REMOTE" if target else "REMOTE"
+        target += [(" · ", "$chat-muted")] if target else []
+        target.append(("REMOTE", "bold $lens-warn"))
+    if experimental:
+        target += [(" · ", "$chat-muted")] if target else []
+        target.append(("experimental", "$chat-muted"))
     if target:
-        lines.append(center(target, "$chat-muted"))
+        lines.append(Content(""))
+        lines.append(center(*target).truncate(max(1, width), ellipsis=True))
     lines.append(Content(""))
     if egress:
-        lines.append(Content.assemble(" ", (egress, "$lens-warn")))
+        lines.append(Content.assemble("  ", (egress, "$lens-warn")))
         lines.append(Content(""))
     examples = list(examples)
     if examples:
-        lines.append(Content.styled(" Try", "bold"))
+        lines.append(Content.styled("  Try", "$chat-muted"))
         for example in examples:
-            line = Content.assemble("   ", ("› ", "$chat-muted"), example)
+            line = Content.assemble("    ", (example, "$lens-text"))
             lines.append(line.truncate(max(1, width), ellipsis=True))
         lines.append(Content(""))
     wide = "  ".join(SLASH_COMMANDS)
-    if cell_len(wide) + 1 <= width:
-        lines.append(Content.styled(" " + wide, "$chat-muted"))
+    if cell_len(wide) + 2 <= width:
+        lines.append(Content.styled("  " + wide, "$chat-muted"))
     else:
         lines.append(
             Content.styled(
-                " " + " ".join(_NARROW_COMMANDS) + "  · / for all", "$chat-muted"
+                "  " + " ".join(_NARROW_COMMANDS) + "  · / for all", "$chat-muted"
             )
         )
     return Content("\n").join(lines)
@@ -1602,6 +1768,13 @@ class EmptyState(Static):
                 else configured_mascot_style()
             ),
         }
+
+    def set_mascot_style(self, style: str | None = None) -> None:
+        """Switch the mascot style (``None``: re-read the configured one)."""
+        resolved = resolve_mascot_style(style) if style else configured_mascot_style()
+        if resolved != self.options["mascot_style"]:
+            self.options["mascot_style"] = resolved
+            self.refresh(layout=True)
 
     def render(self) -> Content:
         width = self.size.width or 80

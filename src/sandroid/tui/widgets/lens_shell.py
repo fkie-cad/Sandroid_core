@@ -204,6 +204,7 @@ from textual.message import Message
 from textual.widgets import Header, Static
 from textual.widgets._header import HeaderClock, HeaderTitle
 
+from sandroid.tui.key_display import key_words
 from sandroid.tui.themes import lens_palette
 
 if TYPE_CHECKING:
@@ -1205,10 +1206,10 @@ class LogTicker(Horizontal):
     """
 
     #: The hint (AI chat + log drawer keys), drawer closed / open.
-    HINT = "^Y AI · ` log"
-    HINT_OPEN = "^Y AI · ` close log"
+    HINT = key_words("^Y AI · ` log")
+    HINT_OPEN = key_words("^Y AI · ` close log")
     #: The same without the AI key, for while an attention badge (which
-    #: names ^Y itself) stands before it.
+    #: names Ctrl+Y itself) stands before it.
     HINT_LOG = "` log"
     HINT_LOG_OPEN = "` close log"
     #: Log lines shown (the widget's height).

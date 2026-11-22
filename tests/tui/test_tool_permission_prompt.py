@@ -256,11 +256,13 @@ async def test_only_the_selected_option_is_highlighted_and_marked():
         backgrounds = [o.styles.background for o in options]
         assert backgrounds[0] != backgrounds[1]
         assert backgrounds[1] == backgrounds[2]  # the others stay plain
-        assert str(options[0].render()).startswith("› ")
-        assert str(options[1].render()).startswith("  ")
+        # The highlight bar alone marks the selection: no glyph on any row.
+        assert all("›" not in str(o.render()) for o in options)
+        assert str(options[0].render()) == options[0].label
         await pilot.press("down")
         assert _highlighted(app) == ["btn-always"]
-        assert str(options[1].render()).startswith("› ")
+        assert str(options[1].render()) == options[1].label
+        assert options[1].styles.background != options[0].styles.background
 
 
 @pytest.mark.smoke

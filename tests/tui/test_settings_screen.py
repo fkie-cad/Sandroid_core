@@ -44,6 +44,7 @@ from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.core.toolbox import Toolbox
 from sandroid.tui.screens.settings_screen import SettingsScreen
 from sandroid.tui.widgets.chat_panel import ChatPanel
+from sandroid.tui.widgets.chat_view import EmptyState, UserBlock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -271,6 +272,40 @@ async def test_ai_chat_help_text_spans_full_row_with_gap_before_next_row():
 
 
 @pytest.mark.smoke
+async def _live_mascot(app, pilot) -> Static:
+    """The input's live mascot, past the empty state (which shows its own
+    mascot instead, so the live one is hidden until the first message).
+    """
+    app.query_one(ChatPanel)._add(UserBlock("hi"))
+    await pilot.pause()
+    return app.query_one("#chat-mascot", Static)
+
+
+async def test_toggle_show_chat_mascot_updates_the_empty_state_mascot(monkeypatch):
+    """Before the first message the empty state's mascot is the one on
+    screen: the toggle must reach it live too.
+    """
+    ai_cfg = SimpleNamespace(show_chat_mascot=True, show_verbose_thinking=False)
+    monkeypatch.setattr(Toolbox, "config", SimpleNamespace(ai=ai_cfg), raising=False)
+
+    app = _ChatSettingsHarness()
+    async with app.run_test(size=(100, 50)) as pilot:
+        empty = app.query_one(EmptyState)
+        assert empty.options["mascot_style"] != "off"
+        assert not app.query_one("#chat-mascot", Static).display
+
+        screen = SettingsScreen()
+        await app.push_screen(screen)
+        await pilot.pause()
+        screen.query_one("#setting-ai--show_chat_mascot", Switch).toggle()
+        await pilot.pause()
+
+        assert ai_cfg.show_chat_mascot is False
+        assert empty.options["mascot_style"] == "off"
+        assert "Sandroid AI" in empty.render().plain  # the text mark instead
+        assert not app.query_one("#chat-mascot", Static).display
+
+
 async def test_toggle_show_chat_mascot_immediately_hides_live_mascot(monkeypatch):
     """Core regression test: flipping "Show Chat Mascot" off must hide the
     mascot on an already-mounted, idle ``ChatPanel`` immediately -- with NO
@@ -281,7 +316,7 @@ async def test_toggle_show_chat_mascot_immediately_hides_live_mascot(monkeypatch
 
     app = _ChatSettingsHarness()
     async with app.run_test(size=(100, 50)) as pilot:
-        mascot = app.query_one("#chat-mascot", Static)
+        mascot = await _live_mascot(app, pilot)
         assert mascot.display is True  # sanity: visible before any toggle
 
         screen = SettingsScreen()
@@ -314,7 +349,7 @@ async def test_toggle_show_chat_mascot_back_on_immediately_shows_it(monkeypatch)
     # actually starts unchecked, matching ai_cfg's starting state.
     app.sandroid_config.ai.show_chat_mascot = False
     async with app.run_test(size=(100, 50)) as pilot:
-        mascot = app.query_one("#chat-mascot", Static)
+        mascot = await _live_mascot(app, pilot)
         assert mascot.display is False
 
         screen = SettingsScreen()
@@ -367,7 +402,7 @@ async def test_cancel_reverts_live_mascot_toggle_preview(monkeypatch):
 
     app = _ChatSettingsHarness()
     async with app.run_test(size=(100, 50)) as pilot:
-        mascot = app.query_one("#chat-mascot", Static)
+        mascot = await _live_mascot(app, pilot)
 
         screen = SettingsScreen()
         await app.push_screen(screen)

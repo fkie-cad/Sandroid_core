@@ -208,17 +208,17 @@ async def test_ticker_attention_badge_names_ctrl_y_once() -> None:
         def hint() -> str:
             return label.render().plain
 
-        assert hint() == "^Y AI · ` log"
-        ticker.set_attention("approval needed · ^Y")
+        assert hint() == "Ctrl+Y AI · ` log"
+        ticker.set_attention("approval needed · Ctrl+Y")
         await settle(pilot)
-        assert hint() == "approval needed · ^Y · ` log"
+        assert hint() == "approval needed · Ctrl+Y · ` log"
         assert label.has_class("-attention")
         ticker.set_drawer_open(True)
         await settle(pilot)
-        assert hint() == "approval needed · ^Y · ` close log"
+        assert hint() == "approval needed · Ctrl+Y · ` close log"
         ticker.set_attention(None)
         await settle(pilot)
-        assert hint() == "^Y AI · ` close log"
+        assert hint() == "Ctrl+Y AI · ` close log"
         assert not label.has_class("-attention")
 
 

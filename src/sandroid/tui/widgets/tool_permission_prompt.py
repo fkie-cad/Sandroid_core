@@ -199,9 +199,8 @@ class ApprovalOption(Static):
         self.can_focus = False
 
     def render(self) -> Content:
-        selected = self.has_class("-highlighted")
-        marker = ("› ", "bold") if selected else "  "
-        return Content.assemble(marker, self.label)
+        # The highlight bar (``-highlighted``) marks the selection; no glyph.
+        return Content(self.label)
 
     def on_click(self, event: events.Click) -> None:
         event.stop()

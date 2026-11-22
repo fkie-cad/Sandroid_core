@@ -887,6 +887,10 @@ def test_key_labels_are_words_in_both_styles() -> None:
             label = format_key(key, style)
             assert not set(KEY_WORDS) & set(label), (style, key, label)
     assert key_words("⇧R ⏎ ←/→") == "Shift+R Enter Left/Right"
+    # Caret notation in hand-written hints reads as a word too.
+    assert key_words("Enter send · ^X stop") == "Enter send · Ctrl+X stop"
+    assert key_words("^Y AI · ^T=Full task") == "Ctrl+Y AI · Ctrl+T=Full task"
+    assert key_words("^ab") == "^ab"  # not a key
 
 
 async def test_header_breadcrumb_uses_plain_separators() -> None:
