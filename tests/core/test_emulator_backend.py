@@ -166,6 +166,11 @@ def test_port_bindable_ignores_time_wait_but_not_a_listener():
     30-60 s; a restart on the same port must not wait for that.
     """
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != "nt":
+        # As the emulator's listeners: Linux lets SO_REUSEADDR skip a
+        # TIME_WAIT only when the socket that left it had the option too
+        # (macOS does not ask).
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
     port = server.getsockname()[1]

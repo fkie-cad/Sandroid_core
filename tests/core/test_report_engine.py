@@ -1048,14 +1048,20 @@ class TestPrivacy:
             doc = _build(session, scope=scope, sections=("privacy",))
             return _section(doc, "privacy")["blocks"][0]["text"]
 
+        def local(sec):
+            # Hit times are epoch seconds: the report shows them in the
+            # host's zone (12:00:20 at UTC+1, 11:00:20 on a UTC CI runner).
+            return (BASE + timedelta(seconds=sec)).astimezone().strftime("%H:%M:%S")
+
         assert intro(run1).startswith(
             f"1 profile value left the device to 1 recipient, the first at "
-            f"12:00:20 (line {first})."
+            f"{local(20)} (line {first})."
         )
         # Run 2 has no privacy line of its own; its hit still counts.
         text2 = intro(run2)
         assert text2.startswith(
-            "1 profile value left the device to 1 recipient, the first at 12:02:40."
+            "1 profile value left the device to 1 recipient, the first at "
+            f"{local(160)}."
         ), text2
         # An end-of-run sweep hit attributed to run 2 counts in run 2 only.
         records.append(hit(400, run_id="run-2", host="sweep.example.org"))
