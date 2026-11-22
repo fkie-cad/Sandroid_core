@@ -20,12 +20,15 @@ widget re-emits its image when Textual repainted its cells and hides it when
 the widget is covered (modal, toast, another screen). Frames are paced by
 acks: every stand-alone frame ends with ``CSI 6n``; the terminal answers once
 it parsed the image, the driver hook swallows the answer, so at most one frame
-is inside the terminal. After three missing answers the ``max_fps`` cap paces.
+is inside the terminal. After three missing answers the ``max_fps`` cap paces;
+about once a second a frame still asks (``ACK_PROBE_S``), and a timely answer
+turns ack pacing back on.
 
 Every frame is composited into a phone body (the bezel); the area outside it
 is the widget background (``$lens-panel``). Clicks on the bezel do nothing;
 drags are clamped to the screen edge. The mouse never takes the focus; keys
-go to the phone only while the widget has the focus (Ctrl+G).
+go to the phone only while the widget has the focus. Only Ctrl+G gives it the
+focus (:meth:`DeviceScreen.focus_from_shortcut`): it is not in the Tab chain.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import functools
 import io
 import math
 import re
+import sys
 import threading
 import time
 import weakref
@@ -82,9 +86,18 @@ DSR_CPR = "\x1b[6n"
 ACK_TIMEOUT_S = 0.5
 #: Lost acks in a row after which the ``max_fps`` cap paces instead.
 ACK_FAILS_MAX = 3
+#: While the ``max_fps`` cap paces, a frame asks at most this often whether
+#: the terminal answers again (an answer within ``ACK_TIMEOUT_S`` re-arms).
+ACK_PROBE_S = 1.0
 #: Writes waiting in Textual's output queue above which a new frame is
 #: dropped (the queue holds 30 writes; a full queue blocks the event loop).
 WRITER_BACKLOG_MAX = 4
+#: Split a frame into ``WRITE_CHUNK`` writes. Only Windows needs it (Textual
+#: chunks there too, #2548); elsewhere every write is one blocking put into
+#: the 30-slot writer queue, so a multi-MB frame in 8 KiB pieces would stall
+#: the event loop.
+CHUNK_WRITES = sys.platform == "win32"
+WRITE_CHUNK = 8192
 #: JPEG quality for the iTerm2 backend.
 JPEG_QUALITY = 80
 #: Half-block cell styles kept (an LRU; 6 bits per channel).
@@ -574,7 +587,7 @@ def _update_touches(update: object, region: Region) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class DeviceScreen(Widget, can_focus=True):
+class DeviceScreen(Widget, can_focus=False):
     """Live device screen (the service's sink) with live touch and keys.
 
     Args:
@@ -585,6 +598,9 @@ class DeviceScreen(Widget, can_focus=True):
         bezel: Draw the phone body.
         touch_marker: Draw a ring where the pointer touches.
         policy: Called before each input (refreshes the input policy).
+
+    ``can_focus`` is False except between :meth:`focus_from_shortcut`
+    (Ctrl+G) and the next blur: Tab never lands on the phone.
     """
 
     DEFAULT_CSS = """
@@ -645,6 +661,9 @@ class DeviceScreen(Widget, can_focus=True):
         def __init__(self, state: ScreenState, detail: str) -> None:
             super().__init__()
             self.state, self.detail = state, detail
+            #: When the service changed state (frames received later are
+            #: from the next stream and survive a blank).
+            self.at = time.monotonic()
 
     def __init__(
         self,
@@ -666,6 +685,7 @@ class DeviceScreen(Widget, can_focus=True):
         self._cell_px_fixed = cell_px
         self._cell_cache: tuple[float, float] | None = None
         self._geom_retry: Timer | None = None
+        self._geom_retries = 0
         caps = terminal_graphics.result()
         if backend is None:
             backend = caps.backend if caps is not None else "halfblock"
@@ -696,6 +716,8 @@ class DeviceScreen(Widget, can_focus=True):
             "reemits": 0,
             "hides": 0,
             "ack_ms": 0.0,
+            "probes": 0,
+            "rearms": 0,
         }
         self._last_error = ""
         # frame hand-off (any thread -> encode thread)
@@ -715,6 +737,7 @@ class DeviceScreen(Widget, can_focus=True):
         self._inflight: list[float] = []
         self._ack_ok = backend != "halfblock"
         self._ack_fail = 0
+        self._probe_t = 0.0  # last probe while pacing by max_fps
         # geometry / output (UI thread; read by the encode thread under _lock)
         self._geom: Geometry | None = None
         self._geom_gen = 0
@@ -724,6 +747,8 @@ class DeviceScreen(Widget, can_focus=True):
         self._payload: tuple[int, Geometry, str] | None = None
         self._hb_strips: list[Strip] | None = None
         self._shown = False
+        self._blank_seq = 0  # frames up to this _frame_seq were blanked
+        self._image_serial: str | None = None  # device of the last LIVE
         self._retry_timer: Any = None
         self._hooked = False
         # visibility towards the service
@@ -746,6 +771,15 @@ class DeviceScreen(Widget, can_focus=True):
     def focus_on_click(self) -> bool:
         """Never: the mouse controls the phone without taking the focus."""
         return False
+
+    def focus_from_shortcut(self) -> None:
+        """Ctrl+G: take the focus (keys go to the phone until the next blur).
+
+        The widget is focusable only from here to its next blur, so Tab /
+        Shift+Tab never move the focus onto the phone.
+        """
+        self.can_focus = True
+        self.focus()
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -773,6 +807,14 @@ class DeviceScreen(Widget, can_focus=True):
             app.theme_changed_signal.subscribe(self, self._on_theme_changed)
         except Exception:
             pass
+        try:
+            # Resize / Show alone are not enough: a column shown by a
+            # partial layout may place the widget without either reaching it.
+            self.screen.screen_layout_refresh_signal.subscribe(
+                self, self._on_screen_layout
+            )
+        except Exception:
+            pass
         self._thread = threading.Thread(
             target=self._encode_loop, daemon=True, name="device-screen-encode"
         )
@@ -788,6 +830,7 @@ class DeviceScreen(Widget, can_focus=True):
     def on_unmount(self) -> None:
         self.lift()
         self._active = False
+        self._stop_geom_retry()
         self._send_visible()
         if self.service is not None:
             try:
@@ -811,11 +854,14 @@ class DeviceScreen(Widget, can_focus=True):
 
     def on_hide(self) -> None:
         self.lift()
+        self._stop_geom_retry()
 
     def on_show(self) -> None:
+        self._geom_retries = 0
         self.call_after_refresh(self._refresh_geom)
 
     def on_blur(self, _event: events.Blur) -> None:
+        self.can_focus = False  # out of the Tab chain until the next Ctrl+G
         self.lift()
 
     def notify_style_update(self) -> None:
@@ -826,6 +872,11 @@ class DeviceScreen(Widget, can_focus=True):
     def _on_theme_changed(self, _theme: object) -> None:
         self.call_after_refresh(self._update_bg)
 
+    def _on_screen_layout(self, _screen: object) -> None:
+        """After every layout of the screen: the region may have changed."""
+        if self._active and self.is_mounted:
+            self._refresh_geom()
+
     # -- visibility (driven by MainScreen) ---------------------------------------
 
     def set_active(self, active: bool) -> None:
@@ -835,7 +886,13 @@ class DeviceScreen(Widget, can_focus=True):
         self._active = active
         if not active:
             self.lift()
+            self._stop_geom_retry()
             self._hide_graphics()
+            if not self.has_focus:
+                self.can_focus = False  # a Ctrl+G that never took
+        elif self.is_mounted:
+            self._geom_retries = 0
+            self._refresh_geom()
         self._send_visible()
 
     @property
@@ -907,7 +964,7 @@ class DeviceScreen(Widget, can_focus=True):
 
     def on_device_screen_sink_state(self, message: DeviceScreen.SinkState) -> None:
         message.stop()
-        self.apply_state(message.state, message.detail)
+        self.apply_state(message.state, message.detail, at=message.at)
 
     def apply_device_size(self, width: int, height: int) -> None:
         """Device size in the current orientation (UI thread)."""
@@ -921,22 +978,60 @@ class DeviceScreen(Widget, can_focus=True):
         self._refresh_geom()
         self.post_message(self.SizeChanged(width, height))
 
-    def apply_state(self, state: ScreenState, detail: str = "") -> None:
-        """The service's state (UI thread): blank the screen unless live."""
+    def apply_state(
+        self, state: ScreenState, detail: str = "", at: float | None = None
+    ) -> None:
+        """The service's state (UI thread): blank the screen unless live.
+
+        CONNECTING keeps the last image only while the service still follows
+        the device it came from (a stream restart); after a device switch
+        the old device's picture must not look live.
+
+        Args:
+            state: The new state.
+            detail: The service's technical note.
+            at: When the service changed state (``time.monotonic()``);
+                a frame received after it belongs to the next stream.
+        """
         self.state, self.state_detail = state, detail
-        if state not in (ScreenState.LIVE, ScreenState.CONNECTING):
-            self._blank()
+        serial = self._service_serial()
+        if state is ScreenState.LIVE:
+            self._image_serial = serial
+        elif state is not ScreenState.CONNECTING or serial != self._image_serial:
+            self._blank(at)
         self._render_status()
 
-    def _blank(self) -> None:
+    def _service_serial(self) -> str | None:
+        try:
+            return getattr(self.service, "serial", None)
+        except Exception:
+            return None
+
+    def _blank(self, before: float | None = None) -> None:
+        """Drop the image (UI thread).
+
+        ``before``: keep a frame received after this time (the next stream
+        is already delivering; its frame is not the stale one).
+        """
         with self._lock:
+            if (
+                before is not None
+                and self._frame is not None
+                and self._frame_recv > before
+            ):
+                return
             self._frame = None
             self._frame_seq += 1
+            self._blank_seq = self._frame_seq  # frames in the encoder are stale
         self._last_arr = None
         self._payload = None
         if self._hb_strips is not None:
             self._hb_strips = None
             self.refresh()
+        if self._shown and self.backend != "halfblock":
+            # iTerm2 / sixel pixels stay until Textual rewrites those cells
+            # (kitty deletes its image; the repaint is harmless there)
+            self.call_later(self._force_repaint)
         self._hide_graphics()
 
     # -- status line ------------------------------------------------------------
@@ -1019,17 +1114,22 @@ class DeviceScreen(Widget, can_focus=True):
         """The current geometry (None before the first layout)."""
         return self._geom
 
-    #: While the geometry is None on a shown widget, look again this often.
-    #: The graphics backends recompute on every paint; half-block (and a
-    #: widget placed after its last Resize) would otherwise stay blank.
+    #: While the geometry is None on an active, displayed widget, look again
+    #: this often. The geometry is recomputed on Resize, Show, activation,
+    #: after every layout of the screen and (graphics backends) every paint;
+    #: this is the backstop for a region that was not final at any of them.
     GEOM_RETRY_S = 0.1
+    #: Retries per Resize / Show / activation (a column that stays tiny).
+    GEOM_RETRY_MAX = 50
 
     def _refresh_geom(self) -> bool:
         self._update_bg()
         geom = self._current_geom()
-        if geom is None and self.is_mounted and self.display:
-            if self._geom_retry is None:
-                self._geom_retry = self.set_timer(self.GEOM_RETRY_S, self._retry_geom)
+        if geom is None:
+            self._schedule_geom_retry()
+        else:
+            self._geom_retries = 0
+            self._stop_geom_retry()
         if geom == self._geom:
             return False
         with self._lock:
@@ -1043,6 +1143,39 @@ class DeviceScreen(Widget, can_focus=True):
         self._geom_retry = None
         if self.is_mounted:
             self._refresh_geom()
+
+    def _is_displayed(self) -> bool:
+        """Shown: no ``display: none`` on this widget or any ancestor."""
+        try:
+            return all(
+                node.display
+                for node in self.ancestors_with_self
+                if isinstance(node, Widget)
+            )
+        except Exception:
+            return False
+
+    def _schedule_geom_retry(self) -> None:
+        """Look again soon -- only while the phone is actually on screen.
+
+        A closed column (``display: none`` on ``#device-col``) has an empty
+        region; retrying there would tick for the rest of the session.
+        """
+        if (
+            self._geom_retry is not None
+            or self._geom_retries >= self.GEOM_RETRY_MAX
+            or not self.is_mounted
+            or not self._active
+            or not self._is_displayed()
+        ):
+            return
+        self._geom_retries += 1
+        self._geom_retry = self.set_timer(self.GEOM_RETRY_S, self._retry_geom)
+
+    def _stop_geom_retry(self) -> None:
+        timer, self._geom_retry = self._geom_retry, None
+        if timer is not None:
+            timer.stop()
 
     def _update_bg(self) -> None:
         """Background outside the phone body = what Textual paints here."""
@@ -1059,6 +1192,7 @@ class DeviceScreen(Widget, can_focus=True):
 
     def on_resize(self, _event: events.Resize) -> None:
         self._cell_cache = None
+        self._geom_retries = 0
         self._refresh_geom()
         # The compositor places the widget after the Resize: its region
         # (offset, and size on the first layout) is only final then.
@@ -1137,7 +1271,9 @@ class DeviceScreen(Widget, can_focus=True):
             if loop is None:
                 continue
             try:
-                loop.call_soon_threadsafe(self._deliver, gen, geom, payload, recv)
+                loop.call_soon_threadsafe(
+                    self._deliver, gen, geom, payload, recv, key[0]
+                )
             except RuntimeError:  # the event loop is closed
                 break
 
@@ -1229,9 +1365,13 @@ class DeviceScreen(Widget, can_focus=True):
 
     # -- output (event loop) --------------------------------------------------------
 
-    def _deliver(self, gen: int, geom: Geometry, payload: Any, recv: float) -> None:
+    def _deliver(
+        self, gen: int, geom: Geometry, payload: Any, recv: float, seq: int = 0
+    ) -> None:
         if gen != self._geom_gen or not self.is_mounted or not self._active:
             return  # stale geometry / gone / column hidden
+        if seq and seq <= self._blank_seq:
+            return  # encoded before a blank (emulator gone / device switch)
         self._fps_frames += 1
         self.stats["frames_out"] += 1
         if recv:
@@ -1258,13 +1398,24 @@ class DeviceScreen(Widget, can_focus=True):
             self._emit(new_frame=True)
 
     def _on_ack(self) -> bool:
-        """A ``CSI 6n`` answer arrived (driver input thread): ours?"""
+        """A ``CSI 6n`` answer arrived (driver input thread): ours?
+
+        Only while a frame or probe of ours waits for one; any other answer
+        goes on to the app. A timely answer to a probe (``max_fps`` pacing)
+        turns ack pacing back on.
+        """
         with self._ack_cv:
             if not self._inflight:
                 return False
             sent = self._inflight.pop(0)
-            self._ack_fail = 0
-            self.stats["ack_ms"] = (time.monotonic() - sent) * 1000
+            waited = time.monotonic() - sent
+            self.stats["ack_ms"] = waited * 1000
+            if self._ack_ok:
+                self._ack_fail = 0
+            elif waited <= ACK_TIMEOUT_S:
+                self._ack_fail = 0
+                self._ack_ok = True
+                self.stats["rearms"] += 1
             self._ack_cv.notify_all()
         return True
 
@@ -1287,15 +1438,26 @@ class DeviceScreen(Widget, can_focus=True):
             return
         _gen, g, data = self._payload
         ack = new_frame and self._ack_ok
+        now = time.monotonic()
         if ack:
             with self._ack_cv:
-                self._inflight.append(time.monotonic())
+                self._inflight.append(now)
+        elif new_frame and self._hooked and now - self._probe_t >= ACK_PROBE_S:
+            # pacing by max_fps: ask whether the terminal answers again
+            ack = True
+            self._probe_t = now
+            self.stats["probes"] += 1
+            with self._ack_cv:
+                self._inflight[:] = [now]  # an older probe is long overdue
         x = g.region.x + g.box_x
         y = g.region.y + g.box_y
         seq = f"\x1b7\x1b[{y + 1};{x + 1}H" + data + (DSR_CPR if ack else "") + "\x1b8"
         try:
-            for i in range(0, len(seq), 8192):  # Textual's chunking (#2548)
-                driver.write(seq[i : i + 8192])
+            if CHUNK_WRITES:  # Windows only, like Textual (#2548)
+                for i in range(0, len(seq), WRITE_CHUNK):
+                    driver.write(seq[i : i + WRITE_CHUNK])
+            else:  # one put: chunks would fill the 30-slot queue and block
+                driver.write(seq)
             if new_frame:
                 driver.flush()
         except Exception as exc:
@@ -1409,8 +1571,14 @@ class DeviceScreen(Widget, can_focus=True):
         x, y, _inside = self._dev_xy(event)  # clamped to the edge mid-drag
         if (x, y) != self._last_xy:
             self._last_xy = (x, y)
+            # A lock (replay) may start mid-drag: the service lifts the held
+            # finger when the policy locks; the drag ends here too.
+            self._refresh_policy()
+            if self._refused(self.service.touch("move", int(x), int(y))):
+                self._release()
+                self._set_mark(None)
+                return
             self._set_mark((x, y))
-            self.service.touch("move", int(x), int(y))
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if self._down is None:

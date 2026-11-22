@@ -1762,10 +1762,13 @@ class MainScreen(Screen):
             self._persist_device_panel(False)
 
     def _focus_device(self) -> None:
+        """Ctrl+G: the only way the phone takes the focus (not in the Tab
+        chain; the mouse never focuses it; Esc returns it to the lens).
+        """
         widget = self._device_widget
         if widget is not None:
             try:
-                widget.focus()
+                widget.focus_from_shortcut()
             except Exception:
                 pass
 

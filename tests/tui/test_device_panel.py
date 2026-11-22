@@ -68,6 +68,7 @@ class FakeService:
         self.locked: str | None = None
         self.allow_clipboard = True
         self.closed = False
+        self.serial_value: str | None = None
 
     @property
     def state(self) -> ScreenState:
@@ -75,7 +76,7 @@ class FakeService:
 
     @property
     def serial(self) -> str | None:
-        return None
+        return self.serial_value
 
     def attach(self, sink) -> None:
         self.sink = sink
@@ -417,6 +418,67 @@ async def test_open_state_is_remembered_and_restored(fake) -> None:
         )
 
 
+async def test_geometry_retry_is_bounded_and_stops_when_the_column_closes(
+    fake,
+) -> None:
+    """A shown phone without geometry looks again (bounded); a closed
+    column (``display: none``, empty region) never starts the 10 Hz loop.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        retries: list[int] = []
+        real_retry = dev._retry_geom
+
+        def spy() -> None:
+            retries.append(1)
+            real_retry()
+
+        dev._retry_geom = spy
+        # Open but the region not final: it retries, at most GEOM_RETRY_MAX.
+        dev.GEOM_RETRY_S = 0.001
+        dev.GEOM_RETRY_MAX = 5
+        dev._current_geom = lambda: None
+        dev._geom_retries = 0
+        dev._refresh_geom()
+        await until(pilot, lambda: len(retries) == 5 and dev._geom_retry is None)
+        await settle(pilot)
+        assert len(retries) == 5
+        del dev._current_geom
+        dev._refresh_geom()
+        await until(pilot, lambda: dev.geometry is not None)
+
+        # A retry still pending when the column closes is stopped.
+        dev.GEOM_RETRY_S = 60.0
+        dev._current_geom = lambda: None
+        dev._geom_retries = 0
+        dev._refresh_geom()
+        pending = dev._geom_retry
+        assert pending is not None
+        ms.close_device()
+        await settle(pilot)
+        assert not ms.device_is_open
+        assert dev._geom_retry is None
+        del dev._current_geom
+        del dev.GEOM_RETRY_S
+        del dev.GEOM_RETRY_MAX
+
+        # Closed: every paint / resize refreshes the geometry -- no loop.
+        before = len(retries)
+        assert not dev._is_displayed()
+        for _ in range(3):
+            dev._refresh_geom()
+            assert dev._geom_retry is None
+            await settle(pilot)
+        assert len(retries) == before
+
+        # Opened again: the phone gets its geometry.
+        await pilot.press("ctrl+g")
+        await until(pilot, lambda: ms.device_is_open and dev.geometry is not None)
+        await until(pilot, lambda: dev._geom_retry is None)
+
+
 # --------------------------------------------------------------------------
 # width fit
 # --------------------------------------------------------------------------
@@ -557,6 +619,39 @@ async def test_typing_guard_does_not_swallow_keys_for_the_phone(fake) -> None:
         assert ("text", "a") in fake.calls
 
 
+async def test_tab_never_focuses_the_phone_but_ctrl_g_does(fake) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        assert ms.focused is dev  # Ctrl+G
+        await pilot.press("escape")  # back to the lens
+        await settle(pilot)
+        assert ms.focused is not dev
+        assert not dev.can_focus
+        assert dev not in ms.focus_chain
+        chain = len(ms.focus_chain)
+        for key in ("tab", "shift+tab"):
+            for _ in range(chain + 1):
+                await pilot.press(key)
+                await settle(pilot)
+                assert ms.focused is not dev, key
+        assert fake.of("text") == []
+        await pilot.press("ctrl+g")  # the one way in
+        await until(pilot, lambda: ms.focused is dev)
+        await pilot.press("a")
+        await until(pilot, lambda: ("text", "a") in fake.calls)
+        await pilot.press("escape")
+        await until(pilot, lambda: ms.focused is not dev)
+        assert not dev.can_focus
+        await pilot.press("ctrl+g")  # open, not focused: focus it again
+        await until(pilot, lambda: ms.focused is dev)
+        await pilot.press("ctrl+g")  # focused: close
+        await until(pilot, lambda: not ms.device_is_open)
+        assert ms.focused is not dev
+        assert not dev.can_focus
+
+
 async def test_paste_goes_to_the_phone_and_is_refused_while_tracking(
     fake, monkeypatch
 ) -> None:
@@ -681,6 +776,29 @@ async def test_input_is_locked_while_replaying(fake, monkeypatch) -> None:
         assert [c[1] for c in fake.of("touch")] == ["down", "up"]
 
 
+async def test_a_lock_starting_mid_drag_ends_the_drag(fake, monkeypatch) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        await pilot.mouse_down(dev, offset=_cell_of(dev, 0.5, 0.4))
+        await settle(pilot)
+        assert [c[1] for c in fake.of("touch")] == ["down"]
+        rc = app._recording_controller
+        monkeypatch.setattr(type(rc), "is_replaying", property(lambda s: True))
+        monkeypatch.setattr(type(rc), "run_kind", property(lambda s: "Replay"))
+        await pilot.hover(dev, offset=_cell_of(dev, 0.5, 0.6))  # the next move
+        await settle(pilot)
+        assert fake.locked == "input is locked while a replay runs"
+        assert dev._down is None
+        assert app.mouse_captured is None
+        status = ms.query_one("#device-status")
+        assert str(status.render()) == "input is locked while a replay runs"
+        await pilot.mouse_up(dev, offset=_cell_of(dev, 0.5, 0.6))
+        await settle(pilot)
+        assert [c[1] for c in fake.of("touch")] == ["down"]  # no move, no UP
+
+
 # --------------------------------------------------------------------------
 # streaming, frames, overlays
 # --------------------------------------------------------------------------
@@ -729,6 +847,65 @@ async def test_frames_render_as_half_blocks(fake) -> None:
         # Not live any more: the image goes.
         dev.set_state(ScreenState.GONE, "")
         await until(pilot, lambda: dev._hb_strips is None)
+
+
+async def test_emulator_gone_repaints_over_a_graphics_image(fake) -> None:
+    """iTerm2 / sixel pixels stay until Textual rewrites those cells."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        repaints: list[int] = []
+        dev._force_repaint = lambda: repaints.append(1)
+        try:
+            dev.backend = "iterm"
+            dev._payload = (dev._geom_gen, dev.geometry, "IMAGE")
+            dev._shown = True
+            dev.set_state(ScreenState.GONE, "killed")
+            await until(pilot, lambda: repaints)
+            assert dev._payload is None
+            assert not dev._shown
+            status = ms.query_one("#device-status")
+            assert str(status.render()) == "emulator gone"
+        finally:
+            del dev._force_repaint
+            dev.backend = "halfblock"
+            dev._shown = False
+            dev._payload = None
+
+
+async def test_a_device_switch_blanks_the_old_image(fake) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        w, h = dev.geometry.stream_px
+        fake.serial_value = "emulator-5560"
+        dev.set_state(ScreenState.LIVE, "")
+        await until(pilot, lambda: dev.state is ScreenState.LIVE)
+        dev.push_frame(_frame(w, h))
+        await until(pilot, lambda: dev._hb_strips is not None)
+        # The same device reconnecting keeps its last image.
+        dev.set_state(ScreenState.CONNECTING, "emulator-5560: stream lost")
+        await until(pilot, lambda: dev.state is ScreenState.CONNECTING)
+        await settle(pilot)
+        assert dev._hb_strips is not None
+        # Another device: the old picture must not look live.
+        fake.serial_value = "emulator-5562"
+        dev.set_state(ScreenState.CONNECTING, "emulator-5562 grpc :8556")
+        await until(pilot, lambda: dev._hb_strips is None)
+        # A frame the encoder made before the blank is dropped.
+        strips = halfblock_strips(np.zeros((4, 4, 3), np.uint8), 4, 2, 0, 0, (0, 0, 0))
+        dev._deliver(dev._geom_gen, dev.geometry, strips, 1.0, dev._blank_seq)
+        assert dev._hb_strips is None
+        # A frame of the next stream that came before the (late) state
+        # message is not the stale one: it stays.
+        t0 = time.monotonic()
+        dev.push_frame(_frame(w, h, gen=2, color=(200, 10, 10)))
+        fake.serial_value = "emulator-5564"
+        dev.apply_state(ScreenState.CONNECTING, "", at=t0)
+        assert dev._frame is not None
+        await until(pilot, lambda: dev._hb_strips is not None)
 
 
 async def test_a_toast_does_not_cover_the_phone(fake) -> None:
@@ -793,12 +970,119 @@ async def test_writer_backlog_drops_new_frames(fake, monkeypatch) -> None:
         monkeypatch.setattr(dev, "_writer_backlog", lambda: 0)
         dev._ack_ok = True
         dev._emit(new_frame=True)
-        assert "".join(written).endswith("IMAGE\x1b[6n\x1b8")
+        assert len(written) == 1  # one put per frame (not 8 KiB pieces)
+        assert written[0].endswith("IMAGE\x1b[6n\x1b8")
         assert dev._on_ack() is True  # the ack is ours ...
         assert dev._on_ack() is False  # ... and only once
         dev._shown = False
         dev.backend = "halfblock"
         dev._payload = None
+
+
+async def test_a_frame_is_one_write_except_on_windows(fake, monkeypatch) -> None:
+    """Every write is a blocking put into Textual's 30-slot writer queue:
+    a multi-MB kitty frame in 8 KiB pieces would stall the event loop.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        written: list[str] = []
+        monkeypatch.setattr(app._driver, "write", written.append)
+        monkeypatch.setattr(app._driver, "flush", lambda: None)
+        monkeypatch.setattr(dev, "_writer_backlog", lambda: 0)
+        monkeypatch.setattr(ds, "CHUNK_WRITES", False)
+        big = "X" * (5 * ds.WRITE_CHUNK + 17)
+        dev.backend = "kitty"
+        dev._ack_ok = False
+        dev._payload = (dev._geom_gen, dev.geometry, big)
+        try:
+            dev._emit(new_frame=True)
+            assert len(written) == 1
+            assert big in written[0]
+            dev._emit(new_frame=False)  # a re-emit inside Textual's paint
+            assert len(written) == 2
+            # Windows: Textual's own chunking (#2548), same bytes.
+            written.clear()
+            monkeypatch.setattr(ds, "CHUNK_WRITES", True)
+            dev._emit(new_frame=True)
+            assert len(written) > 5
+            assert all(len(part) <= ds.WRITE_CHUNK for part in written)
+            assert big in "".join(written)
+        finally:
+            dev._shown = False
+            dev.backend = "halfblock"
+            dev._payload = None
+
+
+async def test_ack_pacing_recovers_after_lost_acks(fake, monkeypatch) -> None:
+    """After three lost acks the max_fps cap paces; about once a second a
+    frame still asks (CSI 6n), and a timely answer turns ack pacing back
+    on. A cursor-position answer that is not ours still reaches the app.
+    """
+    from textual import events
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await boot(app, pilot)
+        dev = await _open(pilot, ms)
+        # No encode thread: it would time the acks out on its own clock.
+        dev._stop.set()
+        dev._wake.set()
+        dev._thread.join(timeout=2.0)
+        assert not dev._thread.is_alive()
+        passed: list[object] = []
+        written: list[str] = []
+        monkeypatch.setattr(app._driver, "process_message", passed.append)
+        monkeypatch.setattr(app._driver, "write", written.append)
+        monkeypatch.setattr(app._driver, "flush", lambda: None)
+        monkeypatch.setattr(dev, "_writer_backlog", lambda: 0)
+        assert app.register_device_screen(dev)  # the real driver hook
+        frame_end = "IMAGE\x1b8"
+        probe_end = "IMAGE" + ds.DSR_CPR + "\x1b8"
+        try:
+            dev.backend = "iterm"
+            dev._hooked = True
+            dev._payload = (dev._geom_gen, dev.geometry, "IMAGE")
+            # What the encoder leaves after ACK_FAILS_MAX lost acks.
+            dev._ack_ok = False
+            dev._ack_fail = ds.ACK_FAILS_MAX
+            dev._probe_t = 0.0
+
+            dev._emit(new_frame=True)
+            assert written[-1].endswith(probe_end)  # a probe ...
+            dev._emit(new_frame=True)
+            assert written[-1].endswith(frame_end)  # ... at most once a second
+            app._driver.process_message(events.CursorPosition(1, 1))
+            assert passed == []  # the answer was ours
+            assert dev._ack_ok is True
+            assert dev._ack_fail == 0
+            assert dev.stats["rearms"] == 1
+
+            dev._emit(new_frame=True)  # ack-paced again: every frame asks
+            assert written[-1].endswith(probe_end)
+            app._driver.process_message(events.CursorPosition(1, 1))
+            assert passed == []
+            other = events.CursorPosition(3, 4)  # nobody of ours waits
+            app._driver.process_message(other)
+            assert passed == [other]
+
+            # An answer that comes too late does not re-arm.
+            dev._ack_ok = False
+            dev._probe_t = 0.0
+            dev._emit(new_frame=True)
+            assert written[-1].endswith(probe_end)
+            with dev._ack_cv:
+                dev._inflight[0] -= 2 * ds.ACK_TIMEOUT_S
+            app._driver.process_message(events.CursorPosition(1, 1))
+            assert passed == [other]  # still ours: swallowed
+            assert dev._ack_ok is False
+        finally:
+            app.register_device_screen(None)
+            dev._hooked = False
+            dev._shown = False
+            dev.backend = "halfblock"
+            dev._payload = None
 
 
 async def test_unmount_joins_the_encode_thread(fake) -> None:
