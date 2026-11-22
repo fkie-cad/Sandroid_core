@@ -181,12 +181,15 @@ fi
 command -v uv >/dev/null 2>&1 || die "uv not found (https://docs.astral.sh/uv/)"
 [ -f "$CONSTRAINTS" ] || die "missing $CONSTRAINTS"
 
+#: Optional-dependency groups the test venv installs (part of its key).
+TEST_EXTRAS="dev static-analysis screen"
 PYVER=$("$PY" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
 KEY=$( {
     # [project] dependencies and every optional-dependency group.
     sed -n '/^dependencies = \[/,/^\[project.scripts\]/p' "$WT/pyproject.toml"
     cat "$CONSTRAINTS"
     echo "python $PYVER"
+    echo "extras $TEST_EXTRAS"
 } | hash16)
 VENV="$CACHE/venvs/$KEY"
 mkdir -p "$CACHE/venvs" "$CACHE/slots" "$CACHE/pyc" || die "cannot create $CACHE"
@@ -198,12 +201,12 @@ build_venv() {
     # Only the dependency lists: installing pyproject.toml itself would make
     # Sandroid importable from the venv (and `full` names Sandroid[...]).
     req="$tmp.requirements.txt"
-    "$PY" - "$WT/pyproject.toml" >"$req" <<'EOF' || return 1
+    "$PY" - "$WT/pyproject.toml" $TEST_EXTRAS >"$req" <<'EOF' || return 1
 import sys, tomllib
 proj = tomllib.load(open(sys.argv[1], "rb"))["project"]
 extras = proj.get("optional-dependencies", {})
 deps = list(proj["dependencies"])
-for group in ("dev", "static-analysis"):
+for group in sys.argv[2:]:
     deps += extras.get(group, [])
 print("\n".join(d for d in deps if not d.lower().startswith("sandroid")))
 EOF

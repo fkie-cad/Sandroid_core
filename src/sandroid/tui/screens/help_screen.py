@@ -333,6 +333,14 @@ _HAND_SECTIONS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ),
         ("Esc", "Close (asks once when nothing is selected)", ("escape",)),
     ],
+    # The live phone column (widgets/device_screen.py): its keys go to the
+    # phone while it has the focus; Esc is not sent, it returns to the lens.
+    "Device screen (Ctrl+G)": [
+        ("Ctrl+G", "Device screen: open / focus / close", ("ctrl+g",)),
+        ("Esc", "Back to the lens (the screen stays open)", ("escape",)),
+        ("F2 / F3", "Phone: Home / recent apps", ("f2", "f3")),
+        ("Other keys", "Typed into the phone while it has the focus", ()),
+    ],
 }
 #: Main-screen bindings with this description prefix size the AI chat:
 #: listed in the AI chat section.
@@ -362,6 +370,7 @@ _DOCK_SECTIONS = (
     "AI chat › agents bar",
     "AI chat › slash commands",
     "Log drawer",
+    "Device screen (Ctrl+G)",
 )
 #: Headings of the global (works everywhere) panel sections.
 _GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
