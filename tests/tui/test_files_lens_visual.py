@@ -124,25 +124,10 @@ async def test_a_backup_rename_and_a_move_to_another_folder_stay_rows() -> None:
 
 
 # --------------------------------------------------------------------------
-# V3: paths (group members, profile marker, shared prefixes, "/" breaks)
+# V3: paths (group members, shared prefixes, "/" breaks)
 # --------------------------------------------------------------------------
 
 PROFILE = f"{ROOT}/files/mozilla/k3m7yjvw.default"
-
-
-def test_a_browser_profile_folder_reads_profile() -> None:
-    from sandroid.tui.widgets.files_panel import short_profile
-
-    assert short_profile("files/mozilla/k3m7yjvw.default/cookies.sqlite") == (
-        "@profile/cookies.sqlite"
-    )
-    assert short_profile("files/mozilla/ab12cd34.default-release/x/y") == (
-        "@profile/x/y"
-    )
-    assert short_profile("files/places.sqlite") == "files/places.sqlite"
-    assert short_profile("files/mozilla/k3m7yjvw.default/") == (
-        "files/mozilla/k3m7yjvw.default/"
-    )
 
 
 async def test_members_of_an_open_group_show_their_name_only() -> None:
@@ -155,7 +140,7 @@ async def test_members_of_an_open_group_show_their_name_only() -> None:
         _keys(panel)
         group = next(r for r in panel._rows if r.group == folder)
         assert str(panel._path_cell(group)).startswith(
-            "@profile/safebrowsing-updating/ · 25 files"
+            "files/mozilla/k3m7yjvw.default/safebrowsing-updating/ · 25 files"
         )
         panel._expanded.add(folder)
         _keys(panel)
@@ -440,7 +425,7 @@ async def test_monitor_dialog_dims_follow_in_path_mode_and_remembers(
         assert modal.focused is modal.query_one("#mode-select", RadioSet)
         assert not follow.disabled
         hint = str(modal.query_one(KeyHintFooter).render())
-        assert "Up/Down=Select Mode" in hint
+        assert "Up/Down select mode" in hint  # key-hints style: words, no "="
         assert "↑" not in hint
         border = modal.query_one(".modal-container").styles.border_top[0]
         assert border == "round"

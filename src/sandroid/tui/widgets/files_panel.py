@@ -85,8 +85,8 @@ shows in the final file's row (summed ops and count), not as a second row;
 the Inspector names the temp file and Events keep the rename. ``N`` shows
 both rows raw. Display only: activity, pulls and results are untouched.
 
-**Paths**: app-relative, a browser profile folder (``<salt>.default``)
-as ``@profile/``; the files below an open group show their path inside it;
+**Paths**: app-relative; the files below an open group show their path
+inside it;
 sibling rows that must be shortened share one shortened folder prefix.
 ``.`` shows full paths; the Inspector subtitle and toasts break paths
 after a ``/``, never mid-word.
@@ -502,25 +502,9 @@ class _Row:
     folded: list[_Row] = field(default_factory=list)
 
 
-#: A browser profile folder (Gecko: ``<8 chars>.default``,
-#: ``….default-release``) and everything above it in an app-relative path.
-_PROFILE_DIR_RE = re.compile(r"^(?:[^/]+/)*?[a-z0-9]{8}\.default[A-Za-z0-9_-]*/")
-#: What the lens shows instead (the Inspector has the full path).
-PROFILE_MARK = "@profile/"
 #: A shared, shortened folder prefix needs this many cells, else a row
 #: truncates on its own (``FilesPanel._folder_rooms``).
 _MIN_DIR_ROOM = 8
-
-
-def short_profile(rel: str) -> str:
-    """``files/mozilla/k3m7yjvw.default/cookies.sqlite`` ->
-    ``@profile/cookies.sqlite`` (like ``@de/`` and ``@ext/`` of
-    ``app_relative``); other paths pass through.
-    """
-    match = _PROFILE_DIR_RE.match(rel)
-    if match is None or match.end() >= len(rel):
-        return rel
-    return PROFILE_MARK + rel[match.end() :]
 
 
 def atomic_rename_target(act: PathActivity | None) -> str | None:
@@ -1891,12 +1875,12 @@ class FilesPanel(Widget):
         return self._path_cell_inner(row)
 
     def _display_path(self, path: str) -> str:
-        """``path`` as the table shows it: app-relative, a browser profile
-        folder as ``@profile/`` (``.`` full paths: unchanged).
+        """``path`` as the table shows it: app-relative (``.`` full
+        paths: unchanged).
         """
         if self._full_paths:
             return path
-        return short_profile(app_relative(path))
+        return app_relative(path)
 
     def _cell_layout(self, row: _Row, indent: int = 0) -> tuple:
         """``(owner, shown, suffix, width)`` of a file row's path cell:
