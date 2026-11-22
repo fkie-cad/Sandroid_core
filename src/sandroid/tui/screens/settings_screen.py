@@ -345,7 +345,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         """
         yield Switch(value=value, id=id, classes="setting-switch")
         yield Static(
-            "ON" if value else "OFF",
+            "on" if value else "off",
             id=f"{id}-state",
             classes=f"switch-state {'switch-state-on' if value else 'switch-state-off'}",
         )
@@ -355,7 +355,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         config = self._get_config()
 
         with Vertical(id="settings-container"):
-            yield Static("[bold #58a6ff]=== Settings ===[/]", id="settings-title")
+            yield Static("Settings", id="settings-title")
 
             with TabbedContent(id="settings-tabs"):
                 with TabPane("General", id="tab-general"):
@@ -1432,7 +1432,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                     self._apply_ai_toggle_live(key, event.value)
             try:
                 state_label = self.query_one(f"#{widget_id}-state", Static)
-                state_label.update("ON" if event.value else "OFF")
+                state_label.update("on" if event.value else "off")
                 state_label.set_class(event.value, "switch-state-on")
                 state_label.set_class(not event.value, "switch-state-off")
             except Exception:

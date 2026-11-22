@@ -177,6 +177,16 @@ def test_brief_line_leaves_tool_state_notes_to_the_status_page():
     assert "QUIC" in this_app.markup("#0f0", "#ff0", "#f00", "#888", brief=True)
 
 
+def test_off_is_muted_not_the_ok_colour():
+    """House rule: an "off" state reads in the muted colour, never green."""
+    view = nm.derive_method(BASE)
+    assert view.preset == nm.OFF
+    markup = view.markup("#0f0", "#ff0", "#f00", "#888")
+    assert "[#888]Off[/]" in markup
+    assert "#0f0" not in markup
+    assert "[#0f0]" in nm.derive_method(THIS).markup("#0f0", "#ff0", "#f00", "#888")
+
+
 # -- apply plans ---------------------------------------------------------------------
 
 

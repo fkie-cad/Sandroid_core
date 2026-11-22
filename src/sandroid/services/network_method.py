@@ -160,7 +160,12 @@ class MethodView:
         """
         from rich.markup import escape
 
-        colour = bad if self.problems else (warn if self.preset == CUSTOM else ok)
+        if self.problems:
+            colour = bad
+        elif self.preset == OFF:
+            colour = dim  # "off" states are muted, never the ok colour
+        else:
+            colour = warn if self.preset == CUSTOM else ok
         text = f"[{dim}]Network method:[/] [{colour}]{escape(self.name)}[/]."
         if self.covered:
             text += " " + escape(_sentence(self.covered))
