@@ -752,8 +752,10 @@ async def test_a_toast_does_not_cover_the_phone(fake) -> None:
 
 
 async def test_a_toast_does_not_cover_a_column_restored_at_startup(fake) -> None:
-    """Restored from ui_state while MainScreen mounts (found on device: the
-    toast rack kept its bottom-right alignment and covered the column)."""
+    """A column restored from ui_state while MainScreen mounts.
+
+    Found on device: toasts stayed bottom-right and covered the column.
+    """
     from textual.widgets._toast import Toast
 
     from sandroid.config.ui_state import update_ui_state
